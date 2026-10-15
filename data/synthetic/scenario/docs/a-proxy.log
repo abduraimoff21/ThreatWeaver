@@ -1,0 +1,3 @@
+2026-10-14T10:00:01Z proxy user=alice GET https://update-check.example.net/stage1.bin dst=203.0.113.45
+2026-10-14T10:00:05Z proxy user=bob GET http://198.51.100.60/x.ps1 dst=198.51.100.60
+2026-10-14T10:02:10Z proxy user=carol GET https://docs.example.org/handbook.pdf dst=192.0.2.80

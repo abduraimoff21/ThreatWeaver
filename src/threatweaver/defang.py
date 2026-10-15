@@ -73,3 +73,17 @@ def refang(original: str) -> Refanged:
         pos = m.end()
     keep(pos, len(original))
     return Refanged("".join(parts), starts, ends, changed)
+
+
+def defang(value: str) -> str:
+    """Make an indicator safe to paste into reports and chat (inverse of `refang`).
+
+    `refang(defang(x)).text == x` for every normalized IOC value.
+    """
+    if "://" in value:
+        scheme, rest = value.split("://", 1)
+        scheme = {"http": "hxxp", "https": "hxxps"}.get(scheme.lower(), scheme)
+        return f"{scheme}://{rest.replace('.', '[.]')}"
+    if ":" in value:  # IPv6
+        return value.replace(":", "[:]")
+    return value.replace(".", "[.]")

@@ -59,4 +59,12 @@ Measure:
 
 ## Milestones
 
-- **Milestone 1 (current):** IOC extraction and normalization only (modules A and B). No network access, no enrichment, no feeds.
+- **Milestone 1:** IOC extraction and normalization (modules A, B). Offline.
+- **Milestone 2:** feeds (C: URLhaus and Feodo Tracker only), correlation (D), triage (E), reports (F).
+- **Milestone 3:** Sigma and YARA test harness (G), human-approved advisory publishing (H), benchmark.
+
+Decisions recorded while building:
+
+- URLhaus bulk exports now require a free abuse.ch Auth-Key (environment variable `URLHAUS_AUTH_KEY`); Feodo Tracker needs none.
+- Feed matching uses the newest snapshot of each feed; older snapshots are kept as history.
+- "Publishing" an advisory writes local files only; a person must approve at an interactive terminal.

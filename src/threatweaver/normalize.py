@@ -14,12 +14,17 @@ import ipaddress
 import re
 from urllib.parse import urlsplit
 
-from .extract import valid_domain
+from .extract import valid_domain, valid_domain_syntax
 from .models import HASH_LENGTHS, Candidate, IocType, NormalizedIoc
 
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ftp": 21}
 _UNRESERVED = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _PCT_RE = re.compile(r"%([0-9A-Fa-f]{2})")
+
+
+_DOCUMENTATION_NETS = tuple(
+    ipaddress.ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")
+)
 
 
 def _ip_attrs(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> dict[str, str]:
@@ -31,8 +36,12 @@ def _ip_attrs(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> dict[str, st
         scope = "multicast"
     elif ip.is_unspecified:
         scope = "unspecified"
+    elif any(ip.version == n.version and ip in n for n in _DOCUMENTATION_NETS):
+        # RFC 5737 / 3849. Never routable in real life; here they stand in for real
+        # addresses in synthetic data, so triage treats them like global ones.
+        scope = "documentation"
     elif ip.is_private:
-        scope = "private"  # includes RFC 5737 / 3849 documentation ranges
+        scope = "private"
     elif ip.is_global:
         scope = "global"
     else:
@@ -48,11 +57,12 @@ def _normalize_ip(value: str) -> NormalizedIoc:
     return NormalizedIoc(kind, str(ip), _ip_attrs(ip))
 
 
-def _normalize_domain(value: str) -> str:
+def _normalize_domain(value: str, trusted: bool = False) -> str:
     name = value.strip().lower().rstrip(".")
     if not name.isascii():
         name = name.encode("idna").decode("ascii")
-    if not valid_domain(name, allow_ambiguous=True):
+    ok = valid_domain(name, allow_ambiguous=True) or (trusted and valid_domain_syntax(name))
+    if not ok:
         raise ValueError(f"not a valid domain: {value!r}")
     return name
 
@@ -83,7 +93,7 @@ def _remove_dot_segments(path: str) -> str:
     return result if result.startswith("/") else "/" + result
 
 
-def _normalize_url(value: str) -> NormalizedIoc:
+def _normalize_url(value: str, trusted: bool = False) -> NormalizedIoc:
     parts = urlsplit(value.strip())
     scheme = parts.scheme.lower()
     if scheme not in _DEFAULT_PORTS:
@@ -96,7 +106,7 @@ def _normalize_url(value: str) -> NormalizedIoc:
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        host_n = _normalize_domain(host)
+        host_n = _normalize_domain(host, trusted)
     else:
         host_n = str(ip) if ip.version == 4 else f"[{ip}]"
 
@@ -117,8 +127,13 @@ def _normalize_url(value: str) -> NormalizedIoc:
     return NormalizedIoc(IocType.URL, url, {"host": host_n.strip("[]")})
 
 
-def normalize_value(kind: IocType, value: str) -> NormalizedIoc:
-    """Normalize a raw indicator of known type. Raises ValueError if invalid."""
+def normalize_value(kind: IocType, value: str, trusted: bool = False) -> NormalizedIoc:
+    """Normalize a raw indicator of known type. Raises ValueError if invalid.
+
+    `trusted=True` is for values a curated feed already declared to be domains
+    or URLs: the TLD allowlist is skipped (feeds list newer TLDs than the
+    bundled subset) but label syntax is still enforced.
+    """
     if kind in (IocType.IPV4, IocType.IPV6):
         result = _normalize_ip(value)
         # IPv4-mapped IPv6 (::ffff:a.b.c.d) is allowed to collapse to IPv4.
@@ -128,9 +143,9 @@ def normalize_value(kind: IocType, value: str) -> NormalizedIoc:
             raise ValueError(f"not an IPv6 address: {value!r}")
         return result
     if kind == IocType.DOMAIN:
-        return NormalizedIoc(kind, _normalize_domain(value))
+        return NormalizedIoc(kind, _normalize_domain(value, trusted))
     if kind == IocType.URL:
-        return _normalize_url(value)
+        return _normalize_url(value, trusted)
     if kind in (IocType.MD5, IocType.SHA1, IocType.SHA256):
         h = value.strip().lower()
         if HASH_LENGTHS.get(len(h)) != kind or not re.fullmatch(r"[0-9a-f]+", h):

@@ -33,14 +33,20 @@ _TRAILING_PUNCT = ".,;:!?*"
 _BRACKETS = {")": "(", "]": "["}
 
 
-def valid_domain(name: str, *, allow_ambiguous: bool = False) -> bool:
+def valid_domain_syntax(name: str) -> bool:
+    """Hostname label rules only (no TLD allowlist); the TLD must not be all digits."""
     name = name.lower().rstrip(".")
     if not name or len(name) > 253:
         return False
     labels = name.split(".")
-    if len(labels) < 2 or not all(_LABEL_RE.match(label) for label in labels):
+    return len(labels) >= 2 and all(_LABEL_RE.match(label) for label in labels) and not labels[-1].isdigit()
+
+
+def valid_domain(name: str, *, allow_ambiguous: bool = False) -> bool:
+    name = name.lower().rstrip(".")
+    if not valid_domain_syntax(name):
         return False
-    tld = labels[-1]
+    tld = name.rsplit(".", 1)[-1]
     if tld.startswith("xn--"):
         return len(tld) > 4
     if tld in AMBIGUOUS_TLDS:

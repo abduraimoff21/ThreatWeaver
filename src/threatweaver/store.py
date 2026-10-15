@@ -52,6 +52,63 @@ CREATE TABLE IF NOT EXISTS observations (
     parent_observation_id INTEGER REFERENCES observations(id),
     UNIQUE (source_id, ioc_id, span_start, span_end)
 );
+CREATE TABLE IF NOT EXISTS relations (
+    id        INTEGER PRIMARY KEY,
+    parent_id INTEGER NOT NULL REFERENCES iocs(id),
+    child_id  INTEGER NOT NULL REFERENCES iocs(id),
+    kind      TEXT NOT NULL,
+    source_id INTEGER NOT NULL REFERENCES sources(id),
+    UNIQUE (parent_id, child_id, kind, source_id)
+);
+CREATE TABLE IF NOT EXISTS intel (
+    id           INTEGER PRIMARY KEY,
+    ioc_id       INTEGER NOT NULL REFERENCES iocs(id),
+    source_id    INTEGER NOT NULL REFERENCES sources(id),
+    feed         TEXT NOT NULL,
+    record_key   TEXT NOT NULL,
+    attrs        TEXT NOT NULL,
+    raw          TEXT NOT NULL,
+    collected_at TEXT NOT NULL,
+    UNIQUE (source_id, ioc_id, record_key)
+);
+CREATE TABLE IF NOT EXISTS links (
+    id          INTEGER PRIMARY KEY,
+    rule        TEXT NOT NULL,
+    ioc_a       INTEGER NOT NULL REFERENCES iocs(id),
+    ioc_b       INTEGER NOT NULL REFERENCES iocs(id),
+    explanation TEXT NOT NULL,
+    evidence    TEXT NOT NULL,
+    weight      INTEGER NOT NULL,
+    UNIQUE (rule, ioc_a, ioc_b)
+);
+CREATE TABLE IF NOT EXISTS advisories (
+    id              INTEGER PRIMARY KEY,
+    title           TEXT NOT NULL,
+    body            TEXT NOT NULL,
+    content_sha256  TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    author          TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    reviewer        TEXT,
+    reviewed_at     TEXT,
+    review_note     TEXT,
+    approved_sha256 TEXT,
+    published_at    TEXT,
+    published_path  TEXT
+);
+CREATE TABLE IF NOT EXISTS advisory_events (
+    id             INTEGER PRIMARY KEY,
+    advisory_id    INTEGER NOT NULL REFERENCES advisories(id),
+    action         TEXT NOT NULL,
+    actor          TEXT NOT NULL,
+    at             TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    note           TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_intel_ioc ON intel(ioc_id);
+CREATE INDEX IF NOT EXISTS idx_rel_parent ON relations(parent_id);
+CREATE INDEX IF NOT EXISTS idx_rel_child ON relations(child_id);
 CREATE INDEX IF NOT EXISTS idx_obs_ioc ON observations(ioc_id);
 CREATE INDEX IF NOT EXISTS idx_obs_source ON observations(source_id);
 """
@@ -105,6 +162,7 @@ def ingest_text(
         newlines = [i for i, ch in enumerate(text) if ch == "\n"]
         candidates = extract(text)
         obs_ids: dict[int, int] = {}  # id(candidate) -> observation row id
+        ioc_ids: dict[int, int] = {}  # id(candidate) -> ioc row id
         rejected = new_iocs = new_obs = 0
 
         # extract() lists a URL before its derived host, so parents are stored first.
@@ -113,8 +171,9 @@ def ingest_text(
             if norm is None:
                 rejected += 1
                 continue
-            ioc_id, created = _upsert_ioc(conn, norm.type.value, norm.value, norm.attrs, observed_at)
+            ioc_id, created = upsert_ioc(conn, norm.type.value, norm.value, norm.attrs, observed_at)
             new_iocs += created
+            ioc_ids[id(cand)] = ioc_id
             parent = obs_ids.get(id(cand.derived_from)) if cand.derived_from else None
             cur = conn.execute(
                 "INSERT OR IGNORE INTO observations "
@@ -126,11 +185,16 @@ def ingest_text(
             if cur.rowcount:
                 new_obs += 1
                 obs_ids[id(cand)] = cur.lastrowid
+            if cand.derived_from is not None and id(cand.derived_from) in ioc_ids:
+                conn.execute(
+                    "INSERT OR IGNORE INTO relations (parent_id, child_id, kind, source_id) VALUES (?, ?, 'url_host', ?)",
+                    (ioc_ids[id(cand.derived_from)], ioc_id, source_id),
+                )
 
     return IngestResult(source_id, False, len(candidates), rejected, new_iocs, new_obs)
 
 
-def _upsert_ioc(conn: sqlite3.Connection, kind: str, value: str, attrs: dict[str, str], seen: str) -> tuple[int, int]:
+def upsert_ioc(conn: sqlite3.Connection, kind: str, value: str, attrs: dict[str, str], seen: str) -> tuple[int, int]:
     row = conn.execute("SELECT id FROM iocs WHERE type = ? AND value = ?", (kind, value)).fetchone()
     if row:
         conn.execute("UPDATE iocs SET last_seen = MAX(last_seen, ?) WHERE id = ?", (seen, row["id"]))

@@ -1,0 +1,5 @@
+[
+  {"ip_address": "203.0.113.45", "port": 8080, "status": "online", "hostname": null, "as_number": 64500, "as_name": "EXAMPLE-AS", "country": "ZZ", "first_seen": "2026-10-01 08:00:00", "last_online": "2026-10-14", "malware": "Emotet"},
+  {"ip_address": "198.51.100.60", "port": 80, "status": "online", "hostname": null, "as_number": 64501, "as_name": "EXAMPLE-AS-2", "country": "ZZ", "first_seen": "2026-10-05 11:30:00", "last_online": "2026-10-14", "malware": "Emotet"},
+  {"ip_address": "192.0.2.99", "port": 443, "status": "offline", "hostname": null, "as_number": 64502, "as_name": "EXAMPLE-AS-3", "country": "ZZ", "first_seen": "2026-09-20 02:00:00", "last_online": "2026-10-02", "malware": "QakBot"}
+]

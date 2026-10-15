@@ -1,0 +1,40 @@
+{
+  "_comment": "Expected results derived by hand from the rules in correlate.py / triage.py before the code was run. Indicators are [type, value].",
+  "links": [
+    {"rule": "url_host", "a": ["url", "https://update-check.example.net/stage1.bin"], "b": ["domain", "update-check.example.net"]},
+    {"rule": "url_host", "a": ["url", "http://198.51.100.60/x.ps1"], "b": ["ipv4", "198.51.100.60"]},
+    {"rule": "url_host", "a": ["url", "https://docs.example.org/handbook.pdf"], "b": ["domain", "docs.example.org"]},
+    {"rule": "same_line", "a": ["url", "https://update-check.example.net/stage1.bin"], "b": ["ipv4", "203.0.113.45"]},
+    {"rule": "same_line", "a": ["domain", "update-check.example.net"], "b": ["ipv4", "203.0.113.45"]},
+    {"rule": "same_line", "a": ["url", "https://docs.example.org/handbook.pdf"], "b": ["ipv4", "192.0.2.80"]},
+    {"rule": "same_line", "a": ["domain", "docs.example.org"], "b": ["ipv4", "192.0.2.80"]},
+    {"rule": "same_line", "a": ["ipv4", "10.0.0.15"], "b": ["ipv4", "203.0.113.45"]},
+    {"rule": "same_line", "a": ["ipv4", "10.0.0.16"], "b": ["ipv4", "198.51.100.60"]},
+    {"rule": "shared_family", "a": ["ipv4", "198.51.100.60"], "b": ["ipv4", "203.0.113.45"]}
+  ],
+  "matches": [
+    {"ioc": ["ipv4", "203.0.113.45"], "feed": "feodotracker", "via": "exact"},
+    {"ioc": ["ipv4", "198.51.100.60"], "feed": "feodotracker", "via": "exact"},
+    {"ioc": ["url", "https://update-check.example.net/stage1.bin"], "feed": "urlhaus", "via": "exact"},
+    {"ioc": ["url", "http://198.51.100.60/x.ps1"], "feed": "urlhaus", "via": "exact"},
+    {"ioc": ["domain", "update-check.example.net"], "feed": "urlhaus", "via": "hosts_feed_url"},
+    {"ioc": ["ipv4", "198.51.100.60"], "feed": "urlhaus", "via": "hosts_feed_url"}
+  ],
+  "triage": [
+    {"ioc": ["ipv4", "203.0.113.45"], "level": "high"},
+    {"ioc": ["ipv4", "198.51.100.60"], "level": "high"},
+    {"ioc": ["url", "https://update-check.example.net/stage1.bin"], "level": "high"},
+    {"ioc": ["domain", "update-check.example.net"], "level": "high"},
+    {"ioc": ["url", "http://198.51.100.60/x.ps1"], "level": "medium"},
+    {"ioc": ["domain", "docs.example.org"], "level": "low"},
+    {"ioc": ["ipv4", "192.0.2.80"], "level": "low"},
+    {"ioc": ["url", "https://docs.example.org/handbook.pdf"], "level": "info"},
+    {"ioc": ["ipv4", "10.0.0.15"], "level": "info"},
+    {"ioc": ["ipv4", "10.0.0.16"], "level": "info"}
+  ],
+  "cases": [
+    [["url", "https://update-check.example.net/stage1.bin"], ["domain", "update-check.example.net"], ["ipv4", "203.0.113.45"], ["ipv4", "10.0.0.15"]],
+    [["url", "http://198.51.100.60/x.ps1"], ["ipv4", "198.51.100.60"], ["ipv4", "10.0.0.16"]],
+    [["url", "https://docs.example.org/handbook.pdf"], ["domain", "docs.example.org"], ["ipv4", "192.0.2.80"]]
+  ]
+}

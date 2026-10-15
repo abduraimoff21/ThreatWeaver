@@ -1,0 +1,11 @@
+{
+  "name": "marker_yara",
+  "type": "yara",
+  "rule_file": "marker.yar",
+  "cases": [
+    {"id": "pos-text-marker", "expect_match": true, "data": "header THREATWEAVER-SYNTHETIC-MARKER trailer"},
+    {"id": "pos-hex-marker", "expect_match": true, "data": "xx TW-TEST yy"},
+    {"id": "neg-benign", "expect_match": false, "data": "just an ordinary text file"},
+    {"id": "neg-partial-marker", "expect_match": false, "data": "THREATWEAVER-SYNTHETIC"}
+  ]
+}

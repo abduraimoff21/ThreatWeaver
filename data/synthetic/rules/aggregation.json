@@ -1,0 +1,1 @@
+{"title": "Many failed logons", "detection": {"selection": {"EventID": 4625}, "condition": "selection | count() by IpAddress > 10"}}

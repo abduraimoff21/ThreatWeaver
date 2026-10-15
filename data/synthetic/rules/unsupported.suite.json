@@ -1,0 +1,6 @@
+{
+  "name": "aggregation_rule_is_refused",
+  "type": "sigma",
+  "rule_file": "aggregation.json",
+  "cases": [{"id": "pos", "expect_match": true, "event": {"EventID": 4625}}]
+}

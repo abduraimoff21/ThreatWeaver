@@ -1,0 +1,29 @@
+{
+  "title": "Proxy download of a script or binary from a raw IP address",
+  "id": "00000000-0000-4000-8000-000000000001",
+  "status": "experimental",
+  "description": "Synthetic example rule for the ThreatWeaver test harness.",
+  "logsource": {
+    "category": "proxy"
+  },
+  "detection": {
+    "selection_method": {
+      "cs-method": "GET"
+    },
+    "selection_ip_url": {
+      "c-uri|re": "^https?://\\d{1,3}(\\.\\d{1,3}){3}[:/]"
+    },
+    "selection_ext": {
+      "c-uri|endswith": [
+        ".exe",
+        ".ps1",
+        ".bin"
+      ]
+    },
+    "filter_internal": {
+      "dst_ip|cidr": "10.0.0.0/8"
+    },
+    "condition": "selection_method and selection_ip_url and selection_ext and not filter_internal"
+  },
+  "level": "high"
+}

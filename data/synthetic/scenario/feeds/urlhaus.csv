@@ -1,0 +1,8 @@
+################################################################
+# SYNTHETIC FIXTURE in the URLhaus CSV layout. Not real data.
+################################################################
+# id,dateadded,url,url_status,last_online,threat,tags,urlhaus_link,reporter
+"900001","2026-10-13 09:00:00","https://update-check.example.net/stage1.bin","online","2026-10-14 09:00:00","malware_download","Emotet,exe","https://urlhaus.example/url/900001/","synthetic_reporter"
+"900002","2026-10-13 09:05:00","http://198.51.100.60/x.ps1","offline","2026-10-13 12:00:00","malware_download","ps1","https://urlhaus.example/url/900002/","synthetic_reporter"
+"900003","2026-10-13 09:10:00","https://update-check.example.net/other.bin","online","2026-10-14 09:00:00","malware_download","exe","https://urlhaus.example/url/900003/","synthetic_reporter"
+"900004","2026-10-13 09:15:00","http://192.0.2.99/unrelated.exe","online","2026-10-14 08:00:00","malware_download","None","https://urlhaus.example/url/900004/","synthetic_reporter"

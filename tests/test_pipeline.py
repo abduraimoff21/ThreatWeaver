@@ -1,0 +1,171 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from threatweaver import store
+from threatweaver.correlate import correlate, clusters
+from threatweaver.defang import defang, refang
+from threatweaver.extract import extract
+from threatweaver.feeds import FEODO, load_feed
+from threatweaver.pipeline import run, run_scenario
+from threatweaver.report import build_report, render_markdown, verify_traceability
+from threatweaver.scenario_eval import evaluate_scenario
+from threatweaver.triage import level_for, triage
+
+DATA = Path(__file__).resolve().parents[1] / "data" / "synthetic"
+SCENARIO = DATA / "scenario"
+
+
+@pytest.fixture(scope="module")
+def scenario_run():
+    return run_scenario(SCENARIO)
+
+
+def test_scenario_scores_against_hand_labels():
+    scores = evaluate_scenario(SCENARIO)
+    assert scores.errors == []
+    assert scores.links.precision == 1.0 and scores.links.recall == 1.0
+    assert scores.matches.precision == 1.0 and scores.matches.recall == 1.0
+    assert scores.triage_correct == scores.triage_total == 10 and not scores.triage_unlabeled
+    assert scores.cases_exact
+    assert scores.traceable_fraction == 1.0 and scores.claims > 50
+
+
+def test_pipeline_is_deterministic():
+    a = json.dumps(run_scenario(SCENARIO).report, sort_keys=True)
+    b = json.dumps(run_scenario(SCENARIO).report, sort_keys=True)
+    assert a == b
+
+
+# ------------------------------------------------------------- correlation
+def make(text, source="s1"):
+    conn = store.connect(":memory:")
+    store.ingest_text(conn, text, source)
+    return conn
+
+
+def test_hash_inside_url_is_not_a_co_occurrence_link():
+    h = "0123456789abcdef0123456789abcdef01234567"
+    conn = make(f"https://sandbox.example.com/r/{h}/x\n")
+    assert {l.rule for l in correlate(conn).links} == {"url_host"}
+
+
+def test_same_line_requires_same_source_and_line():
+    conn = store.connect(":memory:")
+    store.ingest_text(conn, "192.0.2.1\n192.0.2.2\n", "a")
+    store.ingest_text(conn, "192.0.2.1 192.0.2.3\n", "b")
+    pairs = {(l.rule, l.explanation) for l in correlate(conn).links}
+    assert len(pairs) == 1 and "192.0.2.1" in next(iter(pairs))[1] and "192.0.2.3" in next(iter(pairs))[1]
+
+
+def test_noisy_lines_are_skipped_not_exploded():
+    ips = " ".join(f"192.0.2.{i}" for i in range(1, 12))
+    result = correlate(make(ips))
+    assert result.links == [] and result.skipped_lines == 1
+
+
+def test_shared_family_links_but_does_not_merge_cases(scenario_run):
+    rules = {l.rule for l in scenario_run.result.links}
+    assert "shared_family" in rules
+    ids = [r["id"] for r in scenario_run.conn.execute("SELECT DISTINCT ioc_id AS id FROM observations")]
+    merged = clusters(ids, scenario_run.result.links)
+    assert len(merged) == 3  # the two Emotet IPs stay in separate cases
+    assert len(clusters(ids, scenario_run.result.links, min_weight=1)) == 2
+
+
+def test_every_link_has_resolvable_evidence(scenario_run):
+    assert all(l.evidence for l in scenario_run.result.links)
+
+
+# ------------------------------------------------------------- triage
+def test_levels_thresholds():
+    assert [level_for(s) for s in (0, 9, 10, 24, 25, 49, 50, 200)] == ["info", "info", "low", "low", "medium", "medium", "high", "high"]
+
+
+def test_rule_points_always_sum_to_score(scenario_run):
+    for v in scenario_run.verdicts.values():
+        assert sum(h.points for h in v.hits) == v.score
+
+
+def test_private_address_never_rises_above_info_even_if_a_feed_lists_it():
+    conn = make("beacon from 10.0.0.9 seen\n")
+    feed = json.dumps([{"ip_address": "10.0.0.9", "port": 443, "status": "online", "malware": "Emotet"}])
+    load_feed(conn, FEODO, feed)
+    (verdict,) = triage(conn).values()
+    assert verdict.level == "info" and verdict.score == 0
+    assert any(h.rule == "TW-T09" for h in verdict.hits)
+
+
+def test_only_the_newest_feed_snapshot_counts_for_matching():
+    conn = make("beacon 203.0.113.9")
+    online = json.dumps([{"ip_address": "203.0.113.9", "port": 443, "status": "online", "malware": "Emotet"}])
+    offline = json.dumps([{"ip_address": "203.0.113.9", "port": 443, "status": "offline", "malware": "Emotet"}])
+    load_feed(conn, FEODO, online, "2026-10-10T00:00:00+00:00")
+    (before,) = triage(conn).values()
+    assert [h.rule for h in before.hits] == ["TW-T01"] and before.level == "high"
+    load_feed(conn, FEODO, offline, "2026-10-12T00:00:00+00:00")
+    (v,) = triage(conn).values()
+    assert [h.rule for h in v.hits] == ["TW-T03"] and v.level == "medium" and v.score == 25
+    assert conn.execute("SELECT COUNT(*) FROM intel").fetchone()[0] == 2  # history kept
+
+
+def test_no_intel_means_info_for_a_lone_indicator():
+    (v,) = triage(make("203.0.113.9")).values()
+    assert v.level == "info" and v.hits == ()
+
+
+def test_nothing_in_the_package_can_block_anything():
+    src = "\n".join(p.read_text(encoding="utf-8") for p in (Path(__file__).resolve().parents[1] / "src" / "threatweaver").rglob("*.py"))
+    for forbidden in ("iptables", "netsh", "subprocess", "os.system", "firewall-cmd", "socket.socket", "smtplib", "requests."):
+        assert forbidden not in src, forbidden
+
+
+# ------------------------------------------------------------- report
+def test_report_is_fully_traceable(scenario_run):
+    trace = verify_traceability(scenario_run.conn, scenario_run.report)
+    assert trace["unresolved"] == 0 and trace["traceable_fraction"] == 1.0
+
+
+def test_traceability_check_detects_tampering():
+    pr = run_scenario(SCENARIO)
+    with pr.conn:
+        pr.conn.execute("UPDATE intel SET raw = 'edited' WHERE id = 1")
+        pr.conn.execute("UPDATE observations SET line_no = 99 WHERE id = 1")
+    trace = verify_traceability(pr.conn, pr.report)
+    assert trace["unresolved"] >= 2 and trace["traceable_fraction"] < 1.0
+
+    pr2 = run_scenario(SCENARIO)
+    with pr2.conn:
+        pr2.conn.execute("DELETE FROM relations WHERE id = 1")
+    assert verify_traceability(pr2.conn, pr2.report)["unresolved"] >= 1
+
+
+def test_markdown_defangs_every_indicator(scenario_run):
+    md = render_markdown(scenario_run.report)
+    leaked = [c.raw for c in extract(md) if not c.defanged]
+    assert leaked == []
+    assert "203[.]0[.]113[.]45" in md and "hxxps://update-check[.]example[.]net/stage1[.]bin" in md
+
+
+def test_markdown_states_it_is_a_draft_and_never_recommends_auto_blocking(scenario_run):
+    md = render_markdown(scenario_run.report)
+    assert "DRAFT FOR ANALYST REVIEW" in md and "does not block" in md
+    assert "human decision" in md
+
+
+def test_empty_database_still_produces_a_valid_report():
+    conn = store.connect(":memory:")
+    report = build_report(conn, "2026-10-14T00:00:00+00:00")
+    assert report["cases"] == [] and verify_traceability(conn, report)["traceable_fraction"] == 1.0
+    assert "0 indicators" in render_markdown(report)
+
+
+# ------------------------------------------------------------- defang
+def test_defang_refang_round_trip_for_all_labeled_values():
+    labels = json.loads((DATA / "labels.json").read_text(encoding="utf-8"))
+    values = [e["value"] for entries in labels.values() for e in entries]
+    assert len(values) > 40
+    for v in values:
+        assert refang(defang(v)).text == v, v
+    assert defang("https://a.example.com/x") == "hxxps://a[.]example[.]com/x"

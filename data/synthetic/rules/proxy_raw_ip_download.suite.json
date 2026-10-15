@@ -1,0 +1,21 @@
+{
+  "name": "proxy_raw_ip_download",
+  "type": "sigma",
+  "rule_file": "proxy_raw_ip_download.json",
+  "cases": [
+    {"id": "pos-ps1-from-raw-ip", "expect_match": true,
+     "event": {"cs-method": "GET", "c-uri": "http://198.51.100.60/x.ps1", "dst_ip": "198.51.100.60"}},
+    {"id": "pos-bin-with-port", "expect_match": true,
+     "event": {"cs-method": "GET", "c-uri": "http://203.0.113.45:8080/payload.bin", "dst_ip": "203.0.113.45"}},
+    {"id": "neg-pdf-from-domain", "expect_match": false,
+     "event": {"cs-method": "GET", "c-uri": "https://docs.example.org/handbook.pdf", "dst_ip": "192.0.2.80"}},
+    {"id": "neg-post-not-get", "expect_match": false,
+     "event": {"cs-method": "POST", "c-uri": "http://198.51.100.60/upload.exe", "dst_ip": "198.51.100.60"}},
+    {"id": "neg-internal-destination-filtered", "expect_match": false,
+     "event": {"cs-method": "GET", "c-uri": "http://10.0.0.5/tool.exe", "dst_ip": "10.0.0.5"}},
+    {"id": "neg-raw-ip-text-file", "expect_match": false,
+     "event": {"cs-method": "GET", "c-uri": "http://198.51.100.60/readme.txt", "dst_ip": "198.51.100.60"}},
+    {"id": "neg-exe-from-domain", "expect_match": false,
+     "event": {"cs-method": "GET", "c-uri": "https://update-check.example.net/setup.exe", "dst_ip": "203.0.113.45"}}
+  ]
+}

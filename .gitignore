@@ -7,3 +7,5 @@ __pycache__/
 *.db-journal
 dist/
 build/
+.threatweaver-cache/
+out/

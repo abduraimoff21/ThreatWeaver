@@ -10,6 +10,11 @@ Rules
   same_line      two different indicators on the same line of the same source,
                  not overlapping each other (weight 2). Lines with many
                  indicators are skipped as too noisy to mean anything.
+  hostname_ip    a host name that spells out an IPv4 address (192-0-2-7.isp.example.net,
+                 7.2.0.192.in-addr..., n192000002007.example.net) and that address,
+                 when both were seen locally (weight 2). Forward or reversed octets,
+                 any number of leading zeros. Evidence cites up to 10 sightings of the
+                 host name (the claim comes from its spelling) and the first of the IP.
   shared_family  two local indicators that exact-match feed records naming the
                  same malware family (weight 1; shown, but does not merge cases)
 
@@ -22,6 +27,7 @@ newest snapshot of each feed:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -31,11 +37,16 @@ from typing import Any
 RULES: dict[str, tuple[int, str]] = {
     "url_host": (3, "URL and its host name or address"),
     "same_line": (2, "different indicators on the same line of the same source"),
+    "hostname_ip": (2, "host name spells out an IPv4 address that was also observed"),
     "shared_family": (1, "both indicators are listed by a feed under the same malware family"),
 }
 CLUSTER_MIN_WEIGHT = 2
 MAX_IOCS_PER_LINE = 8
 MAX_FAMILY_GROUP = 25
+MAX_HOSTNAME_EVIDENCE = 10
+
+_SEPARATED_OCTETS = re.compile(r"(?=(?<!\d)(\d{1,3})([-.])(\d{1,3})\2(\d{1,3})\2(\d{1,3})(?!\d))")
+_PACKED_OCTETS = re.compile(r"(?<!\d)(\d{3})(\d{3})(\d{3})(\d{3})(?!\d)")
 
 
 @dataclass(frozen=True)
@@ -77,6 +88,19 @@ class CorrelationResult:
     matches: list[FeedMatch] = field(default_factory=list)
     skipped_lines: int = 0
     skipped_families: int = 0
+
+
+def encoded_ipv4_candidates(hostname: str) -> set[str]:
+    """Every IPv4 address a host name could be spelling out (forward and reversed octets)."""
+    found: set[str] = set()
+    groups: list[tuple[str, ...]] = [m.group(1, 3, 4, 5) for m in _SEPARATED_OCTETS.finditer(hostname)]
+    groups += [m.groups() for m in _PACKED_OCTETS.finditer(hostname)]
+    for g in groups:
+        octets = [int(x) for x in g]
+        if all(o <= 255 for o in octets):
+            found.add(".".join(map(str, octets)))
+            found.add(".".join(map(str, reversed(octets))))
+    return found
 
 
 def _pair(x: int, y: int) -> tuple[int, int]:
@@ -131,6 +155,22 @@ def correlate(
             "same_line", a, b, f"{label[a]} and {label[b]} appear on the same line",
             tuple(Evidence("observation", i) for i in sorted(set(obs_ids))),
         ))
+
+    # --- hostname_ip -----------------------------------------------------
+    sightings: dict[int, list[int]] = defaultdict(list)
+    for o in conn.execute("SELECT id, ioc_id FROM observations ORDER BY id"):
+        sightings[o["ioc_id"]].append(o["id"])
+    local_ips = {r["value"]: r["id"] for r in conn.execute("SELECT id, value FROM iocs WHERE type = 'ipv4'") if r["id"] in local}
+    for r in conn.execute("SELECT id, value FROM iocs WHERE type = 'domain' ORDER BY id"):
+        if r["id"] not in local:
+            continue
+        for ip in sorted(encoded_ipv4_candidates(r["value"]) & local_ips.keys()):
+            a, b = _pair(r["id"], local_ips[ip])
+            evidence = sightings[r["id"]][:MAX_HOSTNAME_EVIDENCE] + sightings[local_ips[ip]][:1]
+            out.links.append(Link(
+                "hostname_ip", a, b, f"{label[r['id']]} spells out the address {ip}, which was also observed",
+                tuple(Evidence("observation", i) for i in evidence),
+            ))
 
     # --- feed matches ----------------------------------------------------
     intel_by_ioc: dict[int, list[sqlite3.Row]] = defaultdict(list)

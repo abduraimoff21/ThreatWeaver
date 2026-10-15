@@ -169,3 +169,71 @@ def test_defang_refang_round_trip_for_all_labeled_values():
     for v in values:
         assert refang(defang(v)).text == v, v
     assert defang("https://a.example.com/x") == "hxxps://a[.]example[.]com/x"
+
+
+# ------------------------------------------------------------- hostname_ip rule
+def hostname_links(text, feed=None):
+    conn = make(text)
+    if feed:
+        load_feed(conn, FEODO, json.dumps(feed), "2026-10-14T00:00:00+00:00")
+    ident = {r["id"]: r["value"] for r in conn.execute("SELECT id, value FROM iocs")}
+    links = [(ident[l.a], ident[l.b]) for l in correlate(conn).links if l.rule == "hostname_ip"]
+    return conn, [tuple(sorted(p)) for p in links]
+
+
+@pytest.mark.parametrize(
+    "host, note",
+    [
+        ("192-0-2-7.static.example.com", "dashes"),
+        ("host192.0.2.7.isp.example.net", "dots with a prefix"),
+        ("lns-vlq-45-tou-192-0-2-7.adsl.example.net", "embedded mid-name"),
+        ("dsl-192-000-002-007.example.net", "zero-padded groups"),
+        ("n192000002007.example.net", "12 digit run"),
+        ("7.2.0.192.in-addr.example.net", "reversed order"),
+    ],
+)
+def test_hostname_encoding_an_observed_ip_is_linked(host, note):
+    _, links = hostname_links(f"login from {host}\nlater, src 192.0.2.7\n")
+    assert links == [tuple(sorted((host, "192.0.2.7")))], note
+
+
+@pytest.mark.parametrize(
+    "text, why",
+    [
+        ("from 192-0-2-8.static.example.com\nsrc 192.0.2.7\n", "encoded IP is not the observed IP"),
+        ("from host-300-1-1-1.example.net\nsrc 300.1.1.1\n", "octet above 255 is not an address"),
+        ("from 192-0-2-7.static.example.com\n", "the IP itself was never observed"),
+        ("src 192.0.2.7 and static.example.com\n", "nothing is encoded in the name"),
+        ("from 192-0.2-7.static.example.com\nsrc 192.0.2.7\n", "mixed separators"),
+        ("from a1920027b.example.com\nsrc 192.0.2.7\n", "digits that are not four octets"),
+    ],
+)
+def test_hostname_ip_does_not_link_without_real_encoding(text, why):
+    assert hostname_links(text)[1] == [], why
+
+
+def test_hostname_ip_links_every_hostname_for_the_same_ip():
+    _, links = hostname_links("a 192-0-2-7.one.example.com\nb 192.0.2.7.two.example.net\nsrc 192.0.2.7\n")
+    assert len(links) == 2
+
+
+def test_hostname_ip_merges_cases_cites_evidence_and_feeds_triage():
+    feed = [{"ip_address": "192.0.2.7", "port": 443, "status": "online", "malware": "Emotet"}]
+    conn, links = hostname_links("login from 192-0-2-7.static.example.com\nlater, src 192.0.2.7\n", feed)
+    result = correlate(conn)
+    (link,) = [l for l in result.links if l.rule == "hostname_ip"]
+    assert {e.kind for e in link.evidence} == {"observation"} and 2 <= len(link.evidence) <= 2
+    ids = [r["id"] for r in conn.execute("SELECT DISTINCT ioc_id AS id FROM observations")]
+    assert len(clusters(ids, result.links)) == 1
+    by_value = {v.value: v for v in triage(conn, result).values()}
+    host = by_value["192-0-2-7.static.example.com"]
+    assert [h.rule for h in host.hits] == ["TW-T08"] and by_value["192.0.2.7"].level == "high"
+    assert verify_traceability(conn, build_report(conn, "2026-10-14T00:00:00+00:00"))["unresolved"] == 0
+
+
+def test_hostname_ip_evidence_is_capped_but_still_resolvable():
+    lines = "".join(f"line {i} 192-0-2-7.static.example.com\n" for i in range(40)) + "src 192.0.2.7\n"
+    conn, _ = hostname_links(lines)
+    (link,) = [l for l in correlate(conn).links if l.rule == "hostname_ip"]
+    assert len(link.evidence) == 11  # 10 hostname sightings + the first sighting of the IP
+    assert verify_traceability(conn, build_report(conn, "2026-10-14T00:00:00+00:00"))["unresolved"] == 0

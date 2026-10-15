@@ -41,7 +41,7 @@ URLhaus requires a free abuse.ch Auth-Key (https://auth.abuse.ch/). It is read f
 | A | Extraction | `defang.py`, `extract.py` | IPv4/IPv6, domains, URLs, MD5/SHA-1/SHA-256, validated; refangs `hxxp`, `[.]`, `[at]`, ...; URL hosts and nested URLs also emitted; provenance points at the original text. |
 | B | Normalize + dedup | `normalize.py`, `store.py` | Conservative canonical forms; SQLite with one row per indicator and one row per sighting (source, line, offsets, original text). Re-ingesting the same content is a no-op. |
 | C | Feeds | `feeds/` | Exactly two: Feodo Tracker (C2 IPs) and URLhaus (malware URLs). Header-driven parsers, cached rate-limited fetcher, snapshot-level provenance, raw record kept. |
-| D | Correlation | `correlate.py` | Three rules, each link names its rule and cites evidence rows: `url_host`, `same_line`, `shared_family`. Feed matches: `exact` and `hosts_feed_url`. Only the newest snapshot of each feed counts. |
+| D | Correlation | `correlate.py` | Four rules, each link names its rule and cites evidence rows: `url_host`, `same_line`, `hostname_ip`, `shared_family`. Feed matches: `exact` and `hosts_feed_url`. Only the newest snapshot of each feed counts. |
 | E | Triage | `triage.py` | Nine named rules with points, reasons and evidence; levels high/medium/low/info; private addresses capped at info. |
 | F | Report | `report.py` | JSON + Markdown from the same dict; indicators defanged in Markdown; `verify_traceability` re-reads every cited row. |
 | G | Rule harness | `rules.py` | Sigma subset evaluator (pure Python) and YARA via `yara-python`; labeled positive/negative cases; refuses unsupported features instead of passing them. |
@@ -80,7 +80,7 @@ Extraction: ASCII domains only; scheme-less URLs give only the domain; percent-e
 
 Feeds: the live fetch path was exercised only with fake responses; real network behaviour of URLhaus and Feodo has not been run from this repo. Parsers follow the documented layouts (Feodo JSON verified against a sample; URLhaus CSV columns from documentation and are header-driven). Feodo `hostname` is stored but not turned into a link. `shared_family` uses only Feodo's `malware` field because URLhaus tags are not reliable family names.
 
-Correlation: `same_line` is co-occurrence, not causation; lines with more than 8 indicators are skipped; matching ignores older snapshots, so something that aged out of a feed's window stops matching.
+Correlation: `same_line` is co-occurrence, not causation; `hostname_ip` only fires when the IP the name spells out was also observed (a hostname encoding an unseen IP is not linked), covers dotted/dashed/zero-padded/12-digit forms in either octet order, and cites at most 10 sightings of the hostname plus the first of the IP; lines with more than 8 indicators are skipped; matching ignores older snapshots, so something that aged out of a feed's window stops matching.
 
 Rules: the Sigma subset excludes aggregations, `near`, timeframes and most modifiers; the YARA adapter was only tested with a stub because `yara-python` has no wheel for this machine's Python.
 

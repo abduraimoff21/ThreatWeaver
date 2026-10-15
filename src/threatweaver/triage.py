@@ -13,7 +13,7 @@ Rules (points)
   TW-T05  +10  ... and that URL is online
   TW-T06  +10  seen in 2+ different local sources
   TW-T07  +10  an analyst defanged it (they already judged it dangerous)
-  TW-T08  +15  linked (url_host / same_line) to an indicator that scored "high"
+  TW-T08  +15  linked (url_host / same_line / hostname_ip) to an indicator that scored "high"
                on its own merits (first pass; no cascading)
   TW-T09  floor  private / loopback / link-local / multicast address: never above "info"
 """
@@ -131,7 +131,7 @@ def triage(conn: sqlite3.Connection, result: CorrelationResult | None = None) ->
 
     neighbours = defaultdict(list)
     for link in result.links:
-        if link.rule in ("url_host", "same_line"):
+        if link.rule in ("url_host", "same_line", "hostname_ip"):
             neighbours[link.a].append((link.b, link))
             neighbours[link.b].append((link.a, link))
 

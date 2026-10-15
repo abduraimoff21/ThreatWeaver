@@ -190,7 +190,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             "Triage rules:", ""]
     out += [f"- `{k}` {v}" for k, v in report["rule_catalog"].items()]
     out += ["",
-            "Links come from three rules only (url_host, same_line, shared_family); same_line means the same line of the same source and is evidence of co-occurrence, not of causation.",
+            "Links come from four rules only (url_host, same_line, hostname_ip, shared_family); same_line means the same line of the same source and is evidence of co-occurrence, not of causation; hostname_ip relies on the naming convention of the host name and is a strong hint, not proof, that both refer to the same machine.",
             "Feed data is a point-in-time snapshot of public lists and can be stale or wrong. Absence from a feed is not evidence of safety.",
             ""]
     return "\n".join(out)

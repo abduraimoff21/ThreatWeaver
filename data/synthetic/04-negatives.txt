@@ -1,0 +1,5 @@
+Build notes for release v2.4.1 (build 1.2.3).
+Config files touched: settings.json, notes.md, report.pdf, setup.py, deploy.sh, archive.zip, main.rs
+Invalid addresses: 999.1.1.1, 256.256.256.256, 1.2.3, 1.2.3.4.5, 01.02.03.04
+Timestamps and misc: 12:30:45, 2026-10-15, std::string, aa:bb:cc:dd:ee:ff, ratio 3:1
+Unrelated: version=10.2.3 ; foo.bar.baz ; localhost ; server_01.local

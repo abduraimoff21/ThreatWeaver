@@ -1,0 +1,5 @@
+IPv6 sightings: 2001:db8::1, 2001:0DB8:0000:0000:0000:0000:0000:0002 and [2001:db8:abcd::5]:8443.
+Mapped form ::ffff:192.0.2.77 should collapse to IPv4.
+Links: http://[2001:db8::99]:8080/admin and https://www.EXAMPLE.com:443/Path/%7Euser?q=A%2fB#section
+Markdown: [click here](http://download.example.org/file.exe) and trailing punctuation "http://example.net/a/b," plus (see https://example.com/x).
+FTP drop: ftp://files.example.org/pub/tool.tgz

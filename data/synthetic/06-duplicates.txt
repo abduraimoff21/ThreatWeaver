@@ -1,0 +1,8 @@
+Seen in several feeds with different formatting:
+  EVIL-Login.Example.com
+  evil-login.example.com.
+  evil-login[.]example[.]com
+  HTTP://Evil-Login.Example.com:80/Login
+  http://evil-login.example.com/Login#top
+  hxxp://evil-login[.]example[.]com/Login
+IP variants: 203.0.113.45 and 203[.]0[.]113[.]45 and ::ffff:203.0.113.45

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "threatweaver"
+version = "0.1.0"
+description = "Local prototype to help CERT analysts automate repetitive investigative tasks."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+graph = ["networkx>=3"]  # not used until Milestone 3 (correlation)
+
+[project.scripts]
+threatweaver = "threatweaver.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

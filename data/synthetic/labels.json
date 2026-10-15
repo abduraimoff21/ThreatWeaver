@@ -1,0 +1,76 @@
+{
+  "01-firewall.log": [
+    {"type": "ipv4", "value": "203.0.113.45"},
+    {"type": "ipv4", "value": "198.51.100.7"},
+    {"type": "ipv4", "value": "192.0.2.10"},
+    {"type": "ipv4", "value": "192.0.2.11"},
+    {"type": "domain", "value": "login-portal.example.com"},
+    {"type": "domain", "value": "cdn.update-check.example.net"},
+    {"type": "url", "value": "http://203.0.113.45:8080/payload.bin"}
+  ],
+  "02-analyst-email.txt": [
+    {"type": "url", "value": "https://secure-login.example.com/auth/index.php"},
+    {"type": "domain", "value": "secure-login.example.com"},
+    {"type": "url", "value": "http://198.51.100.23/gate.php?id=42"},
+    {"type": "ipv4", "value": "198.51.100.23"},
+    {"type": "domain", "value": "invoice-update.example.org"},
+    {"type": "ipv4", "value": "203.0.113.99"},
+    {"type": "domain", "value": "malware-drop.example.net"},
+    {"type": "domain", "value": "cert.example.com"}
+  ],
+  "03-hashes.txt": [
+    {"type": "md5", "value": "d41d8cd98f00b204e9800998ecf8427e"},
+    {"type": "sha1", "value": "da39a3ee5e6b4b0d3255bfef95601890afd80709"},
+    {"type": "sha256", "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"type": "md5", "value": "0123456789abcdef0123456789abcdef"},
+    {"type": "sha1", "value": "0123456789abcdef0123456789abcdef01234567"},
+    {"type": "url", "value": "https://sandbox.example.com/report/0123456789abcdef0123456789abcdef01234567/summary"},
+    {"type": "domain", "value": "sandbox.example.com"}
+  ],
+  "04-negatives.txt": [],
+  "05-ipv6-and-urls.txt": [
+    {"type": "ipv6", "value": "2001:db8::1"},
+    {"type": "ipv6", "value": "2001:db8::2"},
+    {"type": "ipv6", "value": "2001:db8:abcd::5"},
+    {"type": "ipv4", "value": "192.0.2.77"},
+    {"type": "url", "value": "http://[2001:db8::99]:8080/admin"},
+    {"type": "ipv6", "value": "2001:db8::99"},
+    {"type": "url", "value": "https://www.example.com/Path/~user?q=A%2FB"},
+    {"type": "domain", "value": "www.example.com"},
+    {"type": "url", "value": "http://download.example.org/file.exe"},
+    {"type": "domain", "value": "download.example.org"},
+    {"type": "url", "value": "http://example.net/a/b"},
+    {"type": "domain", "value": "example.net"},
+    {"type": "url", "value": "https://example.com/x"},
+    {"type": "domain", "value": "example.com"},
+    {"type": "url", "value": "ftp://files.example.org/pub/tool.tgz"},
+    {"type": "domain", "value": "files.example.org"}
+  ],
+  "06-duplicates.txt": [
+    {"type": "domain", "value": "evil-login.example.com"},
+    {"type": "url", "value": "http://evil-login.example.com/Login"},
+    {"type": "ipv4", "value": "203.0.113.45"}
+  ],
+  "07-syslog-mixed.txt": [
+    {"type": "ipv4", "value": "198.51.100.200"},
+    {"type": "ipv4", "value": "192.0.2.25"},
+    {"type": "domain", "value": "mail.example.com"},
+    {"type": "domain", "value": "mx.example.com"}
+  ],
+  "08-proxy-urls.txt": [
+    {"type": "url", "value": "https://user:pass@files.example.com:8443/dl?file=a.zip&mode=1"},
+    {"type": "domain", "value": "files.example.com"},
+    {"type": "url", "value": "http://198.51.100.5/admin/login.php"},
+    {"type": "ipv4", "value": "198.51.100.5"},
+    {"type": "url", "value": "http://forum.example.org/thread?id=1&ref=http%3A%2F%2Fexample.net"},
+    {"type": "domain", "value": "forum.example.org"}
+  ],
+  "09-defang-variants.txt": [
+    {"type": "url", "value": "https://bad-site.example.org/a"},
+    {"type": "domain", "value": "bad-site.example.org"},
+    {"type": "domain", "value": "evil.example.com"},
+    {"type": "ipv4", "value": "203.0.113.7"},
+    {"type": "ipv4", "value": "198.51.100.8"},
+    {"type": "domain", "value": "example.org"}
+  ]
+}

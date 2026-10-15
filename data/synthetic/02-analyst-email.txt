@@ -1,0 +1,9 @@
+Subject: Suspicious activity follow-up
+
+Hi team,
+
+The phishing kit was hosted at hxxps://secure-login[.]example[.]com/auth/index.php and
+redirected victims to hxxp://198[.]51[.]100[.]23/gate.php?id=42.
+Sender: billing@invoice-update[.]example[.]org (display name spoofed).
+C2 beacons seen to 203[.]0[.]113[.]99 and malware-drop(.)example(.)net.
+Contact: analyst[at]cert[.]example[.]com

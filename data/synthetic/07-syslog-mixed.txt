@@ -1,0 +1,5 @@
+Oct 14 09:12:01 host1 sshd[2211]: Failed password for root from 198.51.100.200 port 40022 ssh2
+Oct 14 09:12:09 host1 sshd[2211]: Failed password for admin from 198.51.100.200 port 40030 ssh2
+Oct 14 09:15:44 host1 postfix/smtp[3011]: to=<user@mail.example.com>, relay=mx.example.com[192.0.2.25]:25
+Oct 14 09:20:00 host1 kernel: eth0: link up, MAC aa:bb:cc:00:11:22
+Oct 14 09:20:01 host1 app[88]: loaded module libfoo.so.1 from /usr/lib/libfoo.so

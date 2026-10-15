@@ -295,7 +295,7 @@ Levels: **high** at 50 or more, **medium** at 25, **low** at 10, otherwise **inf
 ## Testing and measured results
 
 ```bash
-python -m pytest                 # 226 tests (225 pass; 1 needs yara-python and is skipped without it)
+python -m pytest                 # 236 tests (235 pass; 1 needs yara-python and is skipped without it)
 python -m threatweaver evaluate  # extraction precision / recall
 python -m threatweaver evaluate --scenario
 ```
@@ -319,7 +319,8 @@ What the numbers cannot tell you is how it behaves on your logs. Run it on a cas
 - ASCII host names only; internationalised names in native script are not extracted (punycode `xn--` names are).
 - Scheme-less URLs (`evil.com/a`) yield only the domain. Percent-encoded nested URLs are not decoded.
 - Version strings that look like IPv4 (`10.2.3.4`) and hex-letter tokens such as `Bad::Cafe` can false-positive.
-- The domain-suffix list is a bundled subset of the official one. Suffixes that double as file extensions (`.py .sh .pl .md .rs .so .zip .mov .cc`) are accepted in plain text only under registry-style names such as `edu.pl`, or when defanged, or as a URL host.
+- The domain-suffix list is a bundled subset of the official one. Suffixes that double as file extensions (`.py .sh .pl .md .rs .so .zip .mov .cc`) are accepted in plain text only when the name has four or more labels (`arx58.internetdsl.tpnet.pl`) or a registry-style second level (`wsi.edu.pl`), or when defanged, or as a URL host. Short names such as `awstats.pl` stay rejected, which also means a short real name like `onet.pl` is missed in plain text.
+- An IP address written inside a host name (`62.99.164.82.isp.example.net`, `host-156.202.121.254-static.example.net`) is extracted as the host name, not as a separate IP. The `hostname_ip` rule links the two when the IP also appears on its own.
 - Hashes beyond MD5 / SHA-1 / SHA-256 are not recognised.
 
 **Feeds**
@@ -331,10 +332,17 @@ What the numbers cannot tell you is how it behaves on your logs. Run it on a cas
 - `same_line` is co-occurrence, not causation. `hostname_ip` relies on naming conventions and is a hint, not proof.
 - `shared_family` uses only Feodo's `malware` field, because URLhaus tags are not reliable family names.
 
+**Reports on large inputs**
+- Each indicator in a report shows at most 20 sightings, 20 evidence references per rule or link, and 20 feed matches. The true totals are always stated, and the database keeps everything. Single indicators with no links and no triage rule fired are listed in one compact table instead of one section each.
+
+**Triage**
+- Triage looks only at feed matches, source count, defanging and links. It has no notion of volume or of what the log line says, so an IP with 57,000 failed SSH logins is rated "info" unless a feed lists it.
+
 **Dashboard**
 - Single-user and local: one shared token, no accounts. Reviewer and author names are typed by the person using it.
 - The graph layout is computed once per view (drag nodes to adjust; it does not animate live), and the all-cases view shows at most the 300 highest-scoring linked indicators.
 - Pages refresh when you press Refresh or take an action, not continuously.
+- The Report page shows a preview of the first 600 lines; the download buttons give the whole report.
 - Verified in the Claude desktop app's built-in browser (dark theme); other browsers and the light theme have not been visually checked.
 
 **Rules harness**

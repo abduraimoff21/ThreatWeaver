@@ -2,3 +2,6 @@ Failed password for root from 192.0.2.7.static.example.com port 22 ssh2
 authentication failure; rhost=198-51-100-9.dsl.example.net user=root
 connection from lib.uni-example.edu.pl closed by 203.0.113.12
 build script run: setup.py, deploy.sh, parser.pl and notes.md finished
+denied host-192.0.2.9-static.example.net on port 22
+relay arx58.dsl.example-isp.pl closed
+perl scripts: awstats.pl and webapp.pl ran

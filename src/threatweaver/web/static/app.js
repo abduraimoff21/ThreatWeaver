@@ -108,7 +108,7 @@ async function openIndicator(id) {
     h('h3', {}, 'Why this level'),
     d.rules.length ? d.rules.map((r) => h('div', { class: 'rule ' + (r.points >= 0 ? 'pos' : 'neg') },
       h('span', { class: 'pts' }, (r.points >= 0 ? '+' : '') + r.points), ' ', h('b', {}, r.rule), ' ', h('span', { class: 'muted' }, r.description),
-      h('div', {}, r.reason), h('div', { class: 'small muted' }, `${r.evidence.length} evidence item(s)`)))
+      h('div', {}, r.reason), h('div', { class: 'small muted' }, `${r.evidence_total} evidence item(s)`)))
       : h('p', { class: 'muted' }, 'No triage rule fired for this indicator.'),
     d.feed_matches.length ? h('h3', {}, 'Public feed records') : null,
     d.feed_matches.map((m) => h('div', { class: 'panel' },
@@ -396,8 +396,10 @@ async function viewSources() {
     : empty('No sources yet.');
 }
 
-function download(name, content, type) {
-  const url = URL.createObjectURL(new Blob([content], { type }));
+async function download(path, name) {
+  const res = await fetch(path, { headers: { 'X-TW-Token': TOKEN } });
+  if (!res.ok) throw new Error(`download failed (HTTP ${res.status})`);
+  const url = URL.createObjectURL(await res.blob());
   const a = h('a', { href: url, download: name }); document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 async function viewReport() {
@@ -406,10 +408,11 @@ async function viewReport() {
   return h('div', {},
     h('div', { class: 'banner ' + (t.unresolved ? 'bad' : 'ok') }, t.unresolved ? `${t.unresolved} of ${t.claims} claims could not be matched to stored evidence.` : `Traceability check passed: all ${t.claims} claims point to stored evidence.`),
     h('div', { class: 'toolbar', style: 'margin-bottom:.75rem' },
-      h('button', { class: 'primary', onclick: () => download('threatweaver-report.md', r.markdown, 'text/markdown') }, 'Download Markdown'),
-      h('button', { onclick: () => download('threatweaver-report.json', JSON.stringify(r.json, null, 2), 'application/json') }, 'Download JSON')),
-    h('p', { class: 'small muted' }, 'The Markdown report has every indicator defanged, so it is safe to paste into tickets and chat. The JSON keeps exact values for tools.'),
-    h('pre', { class: 'md' }, r.markdown));
+      h('button', { class: 'primary', onclick: () => guarded(() => download('/api/report.md', 'threatweaver-report.md')) }, 'Download Markdown'),
+      h('button', { onclick: () => guarded(() => download('/api/report.json', 'threatweaver-report.json')) }, 'Download JSON')),
+    h('p', { class: 'small muted' }, 'The Markdown report has every indicator defanged, so it is safe to paste into tickets and chat. The JSON keeps exact values for tools. Each indicator shows up to 20 sightings and evidence items; the true totals are stated, and everything is kept in the database.'),
+    r.truncated ? h('p', { class: 'small muted' }, `Preview of the first ${r.preview.split(String.fromCharCode(10)).length} of ${r.lines} lines. Download for the whole report.`) : null,
+    h('pre', { class: 'md' }, r.preview));
 }
 
 /* ---------- advisories ---------- */

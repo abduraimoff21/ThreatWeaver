@@ -207,7 +207,15 @@ def test_overview_cases_graph_and_report(scenario_web):
     assert len(everything["nodes"]) >= len(g["nodes"])
 
     _, r = scenario_web.get("/api/report")
-    assert r["traceability"]["unresolved"] == 0 and "DRAFT FOR ANALYST REVIEW" in r["markdown"]
+    assert r["traceability"]["unresolved"] == 0 and "DRAFT FOR ANALYST REVIEW" in r["preview"] and r["truncated"] is False
+    status, headers, md = scenario_web.request("GET", "/api/report.md")
+    assert status == 200 and headers["Content-Type"].startswith("text/markdown") and "attachment" in headers["Content-Disposition"]
+    assert b"DRAFT FOR ANALYST REVIEW" in md
+    status, headers, raw = scenario_web.request("GET", "/api/report.json")
+    assert status == 200 and json.loads(raw)["summary"]["indicators"] == 10
+    assert scenario_web.request("GET", "/api/report.md", token=False)[0] == 403
+    assert scenario_web.request("GET", "/api/report.json", host="evil.example")[0] == 403
+    assert scenario_web.request("GET", "/api/report.xml")[0] == 404
 
 
 def test_indicator_detail_explains_the_rules(scenario_web):
@@ -350,3 +358,18 @@ def test_ui_command_exists(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["ui", "--help"])
     assert exc.value.code == 0 and "--no-browser" in capsys.readouterr().out
+
+
+def test_a_huge_report_is_previewed_not_dumped(ctx):
+    store.connect(ctx.db_path).close()
+    server, web = start(ctx)
+    try:
+        text = "".join(f"line {i} host 192.0.2.{i % 250 + 1}.isp{i}.example.com seen 198.51.100.{i % 200 + 1}\n" for i in range(1500))
+        web.post("/api/ingest", {"name": "big.log", "text": text})
+        _, r = web.get("/api/report")
+        assert r["lines"] > api.PREVIEW_LINES and r["truncated"] is True
+        assert len(r["preview"].split(chr(10))) == api.PREVIEW_LINES
+        assert len(json.dumps(r)) < 2_000_000
+        assert len(web.request("GET", "/api/report.md")[2]) > len(r["preview"])
+    finally:
+        server.shutdown()

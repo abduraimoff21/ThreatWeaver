@@ -9,6 +9,7 @@ the analyst asks for exact values.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -185,7 +186,7 @@ def case_detail(ctx: Context, case_id: str) -> dict[str, Any]:
 
 def _link_row(link: dict[str, Any]) -> dict[str, Any]:
     return {"rule": link["rule"], "a": link["a"]["id"], "b": link["b"]["id"],
-            "evidence": len(link["evidence"])}
+            "evidence": link["evidence_total"]}
 
 
 def indicators(ctx: Context, query: dict[str, str]) -> dict[str, Any]:
@@ -201,14 +202,14 @@ def indicators(ctx: Context, query: dict[str, str]) -> dict[str, Any]:
                 continue
             if level and ind["level"] != level:
                 continue
-            sources = sorted({s["source"] for s in ind["sightings"]})
+            sources = ind["sources"]
             if source and not any(source in s.lower() for s in sources):
                 continue
             if needle and needle not in ind["value"].lower() and needle not in defang(ind["value"]).lower():
                 continue
             row = _row(ind, a.case_of[ind["id"]])
-            row.update(sightings=len(ind["sightings"]), sources=sources,
-                       feed_matches=len(ind["feed_matches"]), rules=[r["rule"] for r in ind["rules"]])
+            row.update(sightings=ind["sightings_total"], sources=sources,
+                       feed_matches=ind["feed_matches_total"], rules=[r["rule"] for r in ind["rules"]])
             rows.append(row)
         rows.sort(key=lambda r: (-r["score"], -r["sightings"], r["type"], r["value"]))
         limit = _int(query.get("limit"), 50, 1, PAGE_SIZE_MAX)
@@ -241,7 +242,7 @@ def indicator_detail(ctx: Context, ioc_id: int) -> dict[str, Any]:
                 if ioc_id in (l["a"]["id"], l["b"]["id"]):
                     other = l["b"] if l["a"]["id"] == ioc_id else l["a"]
                     links.append({"rule": l["rule"], "other_id": other["id"], "other_type": other["type"],
-                                  "other": defang(other["value"]), "evidence": len(l["evidence"])})
+                                  "other": defang(other["value"]), "evidence": l["evidence_total"]})
         matches = []
         for m in ind["feed_matches"]:
             fields = {k: _safe_field(k, v) for k, v in m["fields"].items() if v not in ("", None, [])}
@@ -254,7 +255,7 @@ def indicator_detail(ctx: Context, ioc_id: int) -> dict[str, Any]:
         row.update(
             suggested_action=ind["suggested_action"],
             rules=[{"rule": r["rule"], "points": r["points"], "reason": _defang_ioc_text(r["reason"]),
-                    "description": RULE_DESCRIPTIONS.get(r["rule"], ""), "evidence": r["evidence"]} for r in ind["rules"]],
+                    "description": RULE_DESCRIPTIONS.get(r["rule"], ""), "evidence_total": r["evidence_total"]} for r in ind["rules"]],
             sightings=sightings, sightings_total=total, feed_matches=matches, links=links,
         )
         return row
@@ -299,14 +300,32 @@ def sources(ctx: Context) -> dict[str, Any]:
     return {"sources": overview(ctx)["sources"]}
 
 
+PREVIEW_LINES = 600
+
+
 def report(ctx: Context) -> dict[str, Any]:
+    """A bounded preview for the page; the full files come from report_download."""
     conn = ctx.connect()
     try:
         a = analysis(ctx, conn)
-        return {"markdown": render_markdown(a.report), "json": a.report,
-                "traceability": verify_traceability(conn, a.report)}
+        lines = render_markdown(a.report).split(chr(10))
+        return {"preview": chr(10).join(lines[:PREVIEW_LINES]), "lines": len(lines), "truncated": len(lines) > PREVIEW_LINES,
+                "summary": a.report["summary"], "traceability": verify_traceability(conn, a.report)}
     finally:
         conn.close()
+
+
+def report_download(ctx: Context, fmt: str) -> tuple[bytes, str, str]:
+    conn = ctx.connect()
+    try:
+        a = analysis(ctx, conn)
+    finally:
+        conn.close()
+    if fmt == "md":
+        return render_markdown(a.report).encode("utf-8"), "text/markdown; charset=utf-8", "threatweaver-report.md"
+    if fmt == "json":
+        return json.dumps(a.report, indent=2).encode("utf-8"), "application/json; charset=utf-8", "threatweaver-report.json"
+    raise ApiError(404, "unknown report format")
 
 
 # ------------------------------------------------------------------ actions

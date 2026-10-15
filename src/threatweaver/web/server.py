@@ -131,6 +131,9 @@ def make_handler(ctx: Context, token: str, port: int) -> type[BaseHTTPRequestHan
             if not self._api_ok():
                 return
             try:
+                if path in ("/api/report.md", "/api/report.json"):
+                    body, content_type, filename = api.report_download(ctx, path.rsplit(".", 1)[1])
+                    return self._send(HTTPStatus.OK, body, content_type, {"Content-Disposition": f'attachment; filename="{filename}"'})
                 self._json(HTTPStatus.OK, self._route_get(path, query))
             except ApiError as exc:
                 self._error(exc.status, exc.message)

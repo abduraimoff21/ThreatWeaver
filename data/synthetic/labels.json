@@ -260,6 +260,14 @@
     {
       "type": "ipv4",
       "value": "203.0.113.12"
+    },
+    {
+      "type": "domain",
+      "value": "host-192.0.2.9-static.example.net"
+    },
+    {
+      "type": "domain",
+      "value": "arx58.dsl.example-isp.pl"
     }
   ]
 }

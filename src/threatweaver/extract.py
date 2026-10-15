@@ -22,8 +22,9 @@ from .tlds import AMBIGUOUS_TLDS, COMMON_SECOND_LEVELS, KNOWN_TLDS
 
 _URL_RE = re.compile(r"\b(?:https?|ftp)://[^\s<>\"'`\\^{}|]+", re.IGNORECASE)
 _HASH_RE = re.compile(r"(?<![A-Za-z0-9])(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{40}|[0-9A-Fa-f]{32})(?![A-Za-z0-9])")
-# A trailing ".word" means the digits are the start of a host name (62.99.164.82.isp.example.net), not an address.
-_IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\w)")
+# A trailing ".word" or "-word" means the digits are part of a host name (62.99.164.82.isp.example.net,
+# host-156.202.121.254-static.example.net), not an address. A range such as 10.0.0.1-10.0.0.5 is still two addresses.
+_IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\w|-[A-Za-z])")
 _IPV6_RE = re.compile(r"(?<![\w:.])[0-9A-Fa-f:]{2,}(?:\.[0-9.]+)?(?![\w:])")
 _DOMAIN_RE = re.compile(r"(?<![\w.\-/\\])[A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9\-]+)+(?![\w\-])")
 _LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -53,7 +54,8 @@ def valid_domain(name: str, *, allow_ambiguous: bool = False) -> bool:
     if tld in AMBIGUOUS_TLDS:
         # e.g. wsi.edu.pl: a registry-style second level makes a host name far likelier than a file name.
         labels = name.split(".")
-        return allow_ambiguous or (len(labels) >= 3 and labels[-2] in COMMON_SECOND_LEVELS)
+        # Files are named like awstats.pl; host names have more labels (arx58.internetdsl.tpnet.pl).
+        return allow_ambiguous or len(labels) >= 4 or (len(labels) >= 3 and labels[-2] in COMMON_SECOND_LEVELS)
     return tld in KNOWN_TLDS
 
 

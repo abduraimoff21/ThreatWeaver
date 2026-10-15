@@ -237,3 +237,42 @@ def test_hostname_ip_evidence_is_capped_but_still_resolvable():
     (link,) = [l for l in correlate(conn).links if l.rule == "hostname_ip"]
     assert len(link.evidence) == 11  # 10 hostname sightings + the first sighting of the IP
     assert verify_traceability(conn, build_report(conn, "2026-10-14T00:00:00+00:00"))["unresolved"] == 0
+
+
+# ------------------------------------------------------------- report size caps
+def test_report_caps_detail_but_states_true_totals():
+    from threatweaver.report import MAX_SIGHTINGS
+
+    lines = "".join(f"line {i} beacon 203.0.113.9\n" for i in range(150))
+    conn = make(lines)
+    load_feed(conn, FEODO, json.dumps([{"ip_address": "203.0.113.9", "port": 443, "status": "online", "malware": "Emotet"}]))
+    report = build_report(conn, "2026-10-14T00:00:00+00:00")
+    (ind,) = [i for c in report["cases"] for i in c["indicators"]]
+    assert ind["sightings_total"] == 150 and len(ind["sightings"]) == MAX_SIGHTINGS
+    md = render_markdown(report)
+    assert "...and 130 more sightings" in md
+    assert verify_traceability(conn, report)["unresolved"] == 0
+    assert len(json.dumps(report)) < 60_000  # 150 sightings must not balloon the report
+
+
+def test_evidence_cap_keeps_the_first_refs_and_the_real_total():
+    conn = store.connect(":memory:")
+    for n in range(3):
+        store.ingest_text(conn, "".join(f"192.0.2.1 seen {i}\n" for i in range(40)), f"src{n}")
+    report = build_report(conn, "2026-10-14T00:00:00+00:00")
+    (ind,) = [i for c in report["cases"] for i in c["indicators"]]
+    t06 = next(r for r in ind["rules"] if r["rule"] == "TW-T06")
+    assert t06["evidence_total"] == 120 and len(t06["evidence"]) == 20
+    assert "(+100 more)" in render_markdown(report)
+
+
+def test_quiet_single_indicators_are_summarised_not_given_a_section_each():
+    conn = make("".join(f"host 198.51.100.{i}\n" for i in range(1, 31)))
+    md = render_markdown(build_report(conn, "2026-10-14T00:00:00+00:00"))
+    assert "## Quiet indicators (30)" in md and md.count("## Case ") == 0
+    assert md.count("198[.]51[.]100[.]") == 30  # all listed once, defanged, in the compact table
+
+
+def test_a_case_with_something_to_say_still_gets_full_detail(scenario_run):
+    md = render_markdown(scenario_run.report)
+    assert md.count("## Case ") == 3 and "Quiet indicators" not in md

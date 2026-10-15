@@ -30,12 +30,32 @@ NOTICE = (
 )
 LEVEL_ORDER = [name for name, _ in LEVELS]
 
+# Big inputs would otherwise produce reports nobody can open (one IP seen 867 times, 600k sightings).
+# Detail is capped per indicator; the true totals are always stated, and the database keeps everything.
+MAX_SIGHTINGS = 20
+MAX_EVIDENCE = 20
+MAX_FEED_MATCHES = 20
+MAX_QUIET_ROWS = 100
 
-def _ev(evidence: tuple[Evidence, ...]) -> list[dict[str, Any]]:
+
+def _ev(evidence: tuple[Evidence, ...]) -> tuple[list[dict[str, Any]], int]:
+    """Distinct evidence refs in a stable order: (the first MAX_EVIDENCE of them, the true total)."""
     seen: dict[tuple[str, int], dict[str, Any]] = {}
     for e in evidence:
         seen[(e.kind, e.id)] = e.to_dict()
-    return [seen[k] for k in sorted(seen)]
+    ordered = [seen[k] for k in sorted(seen)]
+    return ordered[:MAX_EVIDENCE], len(ordered)
+
+
+def _rule_dict(hit) -> dict[str, Any]:
+    shown, total = _ev(hit.evidence)
+    return {"rule": hit.rule, "points": hit.points, "reason": hit.reason, "evidence": shown, "evidence_total": total}
+
+
+def _link_dict(l, ioc_ref) -> dict[str, Any]:
+    shown, total = _ev(l.evidence)
+    return {"rule": l.rule, "a": ioc_ref(l.a), "b": ioc_ref(l.b), "explanation": l.explanation,
+            "evidence": shown, "evidence_total": total}
 
 
 def build_report(
@@ -92,15 +112,14 @@ def build_report(
                 "score": verdicts[i].score,
                 "level": verdicts[i].level,
                 "suggested_action": verdicts[i].suggested_action,
-                "rules": [{"rule": h.rule, "points": h.points, "reason": h.reason, "evidence": _ev(h.evidence)}
-                          for h in verdicts[i].hits],
-                "sightings": sightings.get(i, []),
-                "feed_matches": matches_for.get(i, []),
+                "rules": [_rule_dict(h) for h in verdicts[i].hits],
+                "sources": sorted({s["source"] for s in sightings.get(i, [])}),
+                "sightings_total": len(sightings.get(i, [])),
+                "sightings": sightings.get(i, [])[:MAX_SIGHTINGS],
+                "feed_matches_total": len(matches_for.get(i, [])),
+                "feed_matches": matches_for.get(i, [])[:MAX_FEED_MATCHES],
             } for i in ordered],
-            "links": [{
-                "rule": l.rule, "a": ioc_ref(l.a), "b": ioc_ref(l.b),
-                "explanation": l.explanation, "evidence": _ev(l.evidence),
-            } for l in result.links if l.a in member_set or l.b in member_set],
+            "links": [_link_dict(l, ioc_ref) for l in result.links if l.a in member_set or l.b in member_set],
         })
     cases.sort(key=lambda c: (-c["max_score"], c["case_id"]))
 
@@ -130,13 +149,20 @@ def _safe_field(key: str, value: Any) -> Any:
     return value
 
 
+def _is_quiet(case: dict[str, Any]) -> bool:
+    """A single indicator, nothing linked to it, and no triage rule fired."""
+    return not case["links"] and case["max_level"] == "info" and len(case["indicators"]) == 1 and not case["indicators"][0]["rules"]
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     def d(_kind: str, value: str) -> str:
         return defang(value)
 
-    def refs(evidence: list[dict[str, Any]]) -> str:
+    def refs(evidence: list[dict[str, Any]], total: int | None = None) -> str:
         short = {"observation": "obs", "intel": "intel", "relation": "rel"}
-        return " ".join(f"`{short[e['kind']]}#{e['id']}`" for e in evidence)
+        text = " ".join(f"`{short[e['kind']]}#{e['id']}`" for e in evidence)
+        more = (total or len(evidence)) - len(evidence)
+        return text + (f" (+{more} more)" if more > 0 else "")
 
     s = report["summary"]
     out = [
@@ -161,7 +187,9 @@ def render_markdown(report: dict[str, Any]) -> str:
     if s["skipped_noisy_lines"]:
         out += ["", f"{s['skipped_noisy_lines']} line(s) with too many indicators were not used for correlation."]
 
-    for case in report["cases"]:
+    detailed = [c for c in report["cases"] if not _is_quiet(c)]
+    quiet = [c for c in report["cases"] if _is_quiet(c)]
+    for case in detailed:
         out += ["", f"## Case {case['case_id']}: {len(case['indicators'])} indicator(s), highest level **{case['max_level']}**", "",
                 "| Level | Score | Type | Indicator |", "|---|---|---|---|"]
         out += [f"| {i['level']} | {i['score']} | {i['type']} | `{d(i['type'], i['value'])}` |" for i in case["indicators"]]
@@ -170,13 +198,15 @@ def render_markdown(report: dict[str, Any]) -> str:
             out += ["", f"**`{d(i['type'], i['value'])}`**: {i['level']} ({i['score']}). {i['suggested_action']}", ""]
             if i["rules"]:
                 for r in i["rules"]:
-                    out.append(f"- `{r['rule']}` {r['points']:+d}: {r['reason']} {refs(r['evidence'])}".rstrip())
+                    out.append(f"- `{r['rule']}` {r['points']:+d}: {r['reason']} {refs(r['evidence'], r.get('evidence_total'))}".rstrip())
             else:
                 out.append("- No triage rule fired.")
             for sg in i["sightings"]:
                 raw = sg["raw"] if sg["defanged"] else defang(sg["raw"])
                 note = " (host of a URL)" if sg["derived_from_url"] else ""
                 out.append(f"- Seen in `{sg['source']}` line {sg['line']}: `{raw}`{note} `obs#{sg['observation_id']}`")
+            if i["sightings_total"] > len(i["sightings"]):
+                out.append(f"- ...and {i['sightings_total'] - len(i['sightings'])} more sightings (all are in the database and the JSON totals).")
             for fm in i["feed_matches"]:
                 f = fm["fields"]
                 detail = ", ".join(f"{k}={_safe_field(k, v)}" for k, v in f.items() if v not in ("", None, []))
@@ -184,8 +214,16 @@ def render_markdown(report: dict[str, Any]) -> str:
                 out.append(f"- Feed `{fm['feed']}` {via}: {detail} (snapshot `{fm['snapshot']}` `{fm['snapshot_sha256'][:12]}`, `intel#{fm['intel_id']}`)")
         if case["links"]:
             out += ["", "### Links", "", "| Rule | A | B | Evidence |", "|---|---|---|---|"]
-            out += [f"| `{l['rule']}` | `{d(l['a']['type'], l['a']['value'])}` | `{d(l['b']['type'], l['b']['value'])}` | {refs(l['evidence'])} |"
+            out += [f"| `{l['rule']}` | `{d(l['a']['type'], l['a']['value'])}` | `{d(l['b']['type'], l['b']['value'])}` | {refs(l['evidence'], l.get('evidence_total'))} |"
                     for l in case["links"]]
+    if quiet:
+        rows = sorted((i for c in quiet for i in c["indicators"]), key=lambda i: (-i["sightings_total"], i["type"], i["value"]))
+        out += ["", f"## Quiet indicators ({len(rows)})", "",
+                "Single indicators with no links and no triage rule fired. Listed compactly; full detail is in the JSON report.", "",
+                "| Type | Indicator | Seen |", "|---|---|---|"]
+        out += [f"| {i['type']} | `{d(i['type'], i['value'])}` | {i['sightings_total']} |" for i in rows[:MAX_QUIET_ROWS]]
+        if len(rows) > MAX_QUIET_ROWS:
+            out.append(f"\n...and {len(rows) - MAX_QUIET_ROWS} more quiet indicators (most-seen first are shown above).")
     out += ["", "## Method and limitations", "",
             "Triage rules:", ""]
     out += [f"- `{k}` {v}" for k, v in report["rule_catalog"].items()]
@@ -215,6 +253,8 @@ def verify_traceability(conn: sqlite3.Connection, report: dict[str, Any]) -> dic
             claims += 1
             if sum(r["points"] for r in ind["rules"]) != ind["score"]:
                 problems.append(f"{name}: rule points do not add up to score")
+            if ind["sightings_total"] < len(ind["sightings"]) or ind["feed_matches_total"] < len(ind["feed_matches"]):
+                problems.append(f"{name}: totals are smaller than the detail shown")
             for r in ind["rules"]:
                 for ref in r["evidence"]:
                     check_ref(ref, f"{name} {r['rule']}")

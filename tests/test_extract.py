@@ -28,6 +28,11 @@ def found(text: str) -> set[tuple[str, str]]:
         ("rhost=68.143.156.89.nw.nuvox.net user=root", {("domain", "68.143.156.89.nw.nuvox.net")}),
         ("host biblioteka.wsi.edu.pl closed", {("domain", "biblioteka.wsi.edu.pl")}),
         ("from 1.2.3.4. next", {("ipv4", "1.2.3.4")}),
+        # found on the full Loghub datasets: IP-in-name followed by a hyphen word, and .pl hosts with 4+ labels
+        ("from host-156.202.121.254-static.tedata.net ok", {("domain", "host-156.202.121.254-static.tedata.net")}),
+        ("relay arx58.internetdsl.tpnet.pl closed", {("domain", "arx58.internetdsl.tpnet.pl")}),
+        ("relay klik18.klik.bydgoszcz.pl closed", {("domain", "klik18.klik.bydgoszcz.pl")}),
+        ("range 10.0.0.1-10.0.0.5", {("ipv4", "10.0.0.1"), ("ipv4", "10.0.0.5")}),
     ],
 )
 def test_positive_cases(text, expected):
@@ -47,6 +52,7 @@ def test_positive_cases(text, expected):
         "::",
         "report.pdf settings.json notes.md setup.py deploy.sh parser.pl main.rs lib.so",
         "a.b.py test.module.py",
+        "awstats.pl webapp.pl proxycheck.pl textenv.pl",
         "libfoo.so.1 /usr/lib/libfoo.so",
         "C:\\temp\\evil.com",
         "server_01.local localhost",

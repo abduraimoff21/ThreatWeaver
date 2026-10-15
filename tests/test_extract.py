@@ -23,6 +23,11 @@ def found(text: str) -> set[tuple[str, str]]:
         ("hash=D41D8CD98F00B204E9800998ECF8427E;x", {("md5", "d41d8cd98f00b204e9800998ecf8427e")}),
         ("xn--80ak6aa92e.com", {("domain", "xn--80ak6aa92e.com")}),
         ("evil.example.com/no/scheme", {("domain", "evil.example.com")}),
+        # found on real sshd logs (Loghub): IP-prefixed reverse-DNS names and a .pl host
+        ("from 62.99.164.82.sh.interxion.inode.at port 22", {("domain", "62.99.164.82.sh.interxion.inode.at")}),
+        ("rhost=68.143.156.89.nw.nuvox.net user=root", {("domain", "68.143.156.89.nw.nuvox.net")}),
+        ("host biblioteka.wsi.edu.pl closed", {("domain", "biblioteka.wsi.edu.pl")}),
+        ("from 1.2.3.4. next", {("ipv4", "1.2.3.4")}),
     ],
 )
 def test_positive_cases(text, expected):
@@ -40,7 +45,8 @@ def test_positive_cases(text, expected):
         "aa:bb:cc:dd:ee:ff",
         "std::string",
         "::",
-        "report.pdf settings.json notes.md setup.py deploy.sh",
+        "report.pdf settings.json notes.md setup.py deploy.sh parser.pl main.rs lib.so",
+        "a.b.py test.module.py",
         "libfoo.so.1 /usr/lib/libfoo.so",
         "C:\\temp\\evil.com",
         "server_01.local localhost",

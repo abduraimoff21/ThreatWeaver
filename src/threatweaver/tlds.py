@@ -40,4 +40,8 @@ GENERIC_TLDS = frozenset(
 # accepted when the text was defanged or the name is the host of a URL.
 AMBIGUOUS_TLDS = frozenset({"py", "sh", "pl", "md", "rs", "so", "zip", "mov", "cc"})
 
+# Second-level labels used under country TLDs (edu.pl, com.py, co.in ...). With one of these in
+# front of an ambiguous TLD the name is accepted even without defanging or a URL context.
+COMMON_SECOND_LEVELS = frozenset({"com", "net", "org", "edu", "gov", "mil", "co", "ac", "info", "biz"})
+
 KNOWN_TLDS = CC_TLDS | GENERIC_TLDS

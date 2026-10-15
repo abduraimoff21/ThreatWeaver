@@ -276,3 +276,71 @@ def test_quiet_single_indicators_are_summarised_not_given_a_section_each():
 def test_a_case_with_something_to_say_still_gets_full_detail(scenario_run):
     md = render_markdown(scenario_run.report)
     assert md.count("## Case ") == 3 and "Quiet indicators" not in md
+
+
+# ------------------------------------------------------------- TW-T10 high-volume repeat activity
+# Expected boundaries, written before the rule existed:
+#   99 sightings -> nothing; 100..999 -> +10 (low); 1,000..9,999 -> +25 (medium); 10,000+ -> +30 (medium).
+# Volume alone never reaches "high" (50), only applies to network indicators, and non-routable
+# addresses stay capped at info.
+def volume_verdict(count, ip="203.0.113.9", extra=""):
+    conn = make("".join(f"event {i} from {ip}\n" for i in range(count)) + extra)
+    return conn, {v.value: v for v in triage(conn).values()}
+
+
+@pytest.mark.parametrize(
+    "count, points, level",
+    [(99, None, "info"), (100, 10, "low"), (999, 10, "low"), (1000, 25, "medium"), (9999, 25, "medium"), (10000, 30, "medium")],
+)
+def test_volume_tiers_have_exact_boundaries(count, points, level):
+    _, verdicts = volume_verdict(count)
+    v = verdicts["203.0.113.9"]
+    t10 = [h for h in v.hits if h.rule == "TW-T10"]
+    assert (t10[0].points if t10 else None) == points and v.level == level
+    if t10:
+        assert f"{count:,}" in t10[0].reason and "not proof" in t10[0].reason
+
+
+def test_volume_alone_can_never_reach_high():
+    _, verdicts = volume_verdict(12000)
+    v = verdicts["203.0.113.9"]
+    assert v.level == "medium" and v.score == 30
+
+
+def test_volume_stacks_with_feed_evidence_and_says_so():
+    conn = make("".join(f"event {i} from 203.0.113.9\n" for i in range(1000)))
+    load_feed(conn, FEODO, json.dumps([{"ip_address": "203.0.113.9", "port": 443, "status": "online", "malware": "Emotet"}]))
+    (v,) = triage(conn).values()
+    assert {h.rule for h in v.hits} == {"TW-T01", "TW-T10"} and v.score == 75 and v.level == "high"
+
+
+def test_hashes_are_not_flagged_for_volume():
+    h = "0123456789abcdef0123456789abcdef"
+    conn = make("".join(f"scan {i} {h}\n" for i in range(5000)))
+    (v,) = triage(conn).values()
+    assert v.level == "info" and v.hits == ()
+
+
+def test_private_addresses_stay_capped_even_with_huge_volume():
+    _, verdicts = volume_verdict(5000, ip="10.0.0.5")
+    v = verdicts["10.0.0.5"]
+    assert v.level == "info" and v.score == 0 and [h.rule for h in v.hits] == ["TW-T10", "TW-T09"]
+
+
+def test_a_volume_only_neighbour_does_not_trigger_the_linked_to_high_risk_rule():
+    # the IP is "medium" on volume alone; the domain on its line must not inherit anything from it
+    conn, verdicts = volume_verdict(12000, extra="203.0.113.9 evil.example.com\n")
+    assert verdicts["203.0.113.9"].level == "medium"
+    assert verdicts["evil.example.com"].level == "info" and verdicts["evil.example.com"].hits == ()
+
+
+def test_volume_rule_is_described_and_traceable():
+    from threatweaver.triage import RULE_DESCRIPTIONS
+
+    assert "TW-T10" in RULE_DESCRIPTIONS and "volume" in RULE_DESCRIPTIONS["TW-T10"].lower()
+    conn, _ = volume_verdict(1500)
+    report = build_report(conn, "2026-10-14T00:00:00+00:00")
+    (ind,) = [i for c in report["cases"] for i in c["indicators"]]
+    rule = next(r for r in ind["rules"] if r["rule"] == "TW-T10")
+    assert rule["evidence_total"] == 1500 and len(rule["evidence"]) == 20
+    assert verify_traceability(conn, report)["unresolved"] == 0

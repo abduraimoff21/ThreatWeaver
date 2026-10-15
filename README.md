@@ -37,7 +37,7 @@ ThreatWeaver is a research prototype. It reads logs and reports, finds IPs, doma
 | **Normalize and de-duplicate** | `EVIL.example.com`, `evil.example.com.` and `evil[.]example[.]com` become one indicator. Every sighting is kept with its source, line number and original text. |
 | **Enrich** | Matches against two public feeds: [Feodo Tracker](https://feodotracker.abuse.ch/) (botnet C2 IPs) and [URLhaus](https://urlhaus.abuse.ch/) (malware URLs). |
 | **Correlate** | Four transparent rules link related indicators into cases. Each link names its rule and cites its evidence. |
-| **Triage** | Nine readable rules produce a suggested level (high / medium / low / info) with the reasons and evidence behind it. |
+| **Triage** | Ten readable rules produce a suggested level (high / medium / low / info) with the reasons and evidence behind it. |
 | **Report** | Markdown and JSON investigation reports, defanged and fully traceable, with a built-in verifier. |
 | **Test detection rules** | A harness that checks Sigma and YARA rules against labeled positive and negative samples. |
 | **Publish advisories safely** | A review workflow with a confidentiality check, a separate reviewer and a typed approval, writing only local files. |
@@ -267,6 +267,7 @@ Indicators connected by links of weight 2 or more form a **case**. Feed matches 
 | TW-T07 | +10 | Defanged by an analyst in a source document |
 | TW-T08 | +15 | Linked to an indicator that is high risk on its own merits |
 | TW-T09 | cap | Private / loopback / link-local / multicast address: never above "info" |
+| TW-T10 | +10 / +25 / +30 | High-volume repeat activity: 100 / 1,000 / 10,000 or more sightings of an IP, domain or URL. Never reaches "high" on its own |
 
 Levels: **high** at 50 or more, **medium** at 25, **low** at 10, otherwise **info**. The thresholds are judgement calls, not calibrated values.
 
@@ -295,7 +296,7 @@ Levels: **high** at 50 or more, **medium** at 25, **low** at 10, otherwise **inf
 ## Testing and measured results
 
 ```bash
-python -m pytest                 # 236 tests (235 pass; 1 needs yara-python and is skipped without it)
+python -m pytest                 # 248 tests (247 pass; 1 needs yara-python and is skipped without it)
 python -m threatweaver evaluate  # extraction precision / recall
 python -m threatweaver evaluate --scenario
 ```
@@ -336,7 +337,8 @@ What the numbers cannot tell you is how it behaves on your logs. Run it on a cas
 - Each indicator in a report shows at most 20 sightings, 20 evidence references per rule or link, and 20 feed matches. The true totals are always stated, and the database keeps everything. Single indicators with no links and no triage rule fired are listed in one compact table instead of one section each.
 
 **Triage**
-- Triage looks only at feed matches, source count, defanging and links. It has no notion of volume or of what the log line says, so an IP with 57,000 failed SSH logins is rated "info" unless a feed lists it.
+- Volume (TW-T10) is the only signal that needs no feed, and it is deliberately weak: the tiers are absolute counts, not scaled to log size, so public DNS servers, CDNs, monitoring and anything noisy that you run will also score. It tops out at "medium" and says so in its reason. It does not read what the log line says, so 57,000 sightings of an IP could be failed logins or normal traffic.
+- Thresholds and points are judgement calls, not calibrated values.
 
 **Dashboard**
 - Single-user and local: one shared token, no accounts. Reviewer and author names are typed by the person using it.

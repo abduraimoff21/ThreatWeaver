@@ -16,6 +16,10 @@ Rules (points)
   TW-T08  +15  linked (url_host / same_line / hostname_ip) to an indicator that scored "high"
                on its own merits (first pass; no cascading)
   TW-T09  floor  private / loopback / link-local / multicast address: never above "info"
+  TW-T10  +10/+25/+30  high-volume repeat activity: 100 / 1,000 / 10,000+ sightings of a
+               network indicator (IP, domain, URL). Volume is a prompt to look, not evidence
+               of malice (public DNS, CDNs and scanners you run all score high here), so the
+               tiers top out below "high" and it only ever adds to other evidence.
 """
 
 from __future__ import annotations
@@ -30,6 +34,9 @@ from .defang import defang
 
 LEVELS = (("high", 50), ("medium", 25), ("low", 10), ("info", 0))
 NON_ROUTABLE = {"private", "loopback", "link_local", "multicast", "unspecified"}
+# (minimum sightings, points), highest first. The top tier stays below the 50 points needed for "high".
+VOLUME_TIERS = ((10_000, 30), (1_000, 25), (100, 10))
+VOLUME_TYPES = {"ipv4", "ipv6", "domain", "url"}  # a hash seen often in logs says nothing by itself
 
 RULE_DESCRIPTIONS = {
     "TW-T01": "Exact match in Feodo Tracker, listed online",
@@ -41,6 +48,7 @@ RULE_DESCRIPTIONS = {
     "TW-T07": "Defanged by an analyst in a source document",
     "TW-T08": "Linked to an indicator that is high risk on its own",
     "TW-T09": "Non-routable address: capped at info",
+    "TW-T10": "High-volume repeat activity (volume is a prompt to look, not proof)",
 }
 
 
@@ -124,6 +132,15 @@ def triage(conn: sqlite3.Connection, result: CorrelationResult | None = None) ->
         if defanged:
             hits.append(RuleHit("TW-T07", 10, "written defanged in a source document",
                                 tuple(Evidence("observation", o["id"]) for o in defanged)))
+        if iocs[ioc_id]["type"] in VOLUME_TYPES:
+            count = len(obs[ioc_id])
+            tier = next((pts for floor, pts in VOLUME_TIERS if count >= floor), None)
+            if tier:
+                spread = len(sources)
+                hits.append(RuleHit(
+                    "TW-T10", tier,
+                    f"seen {count:,} times across {spread} source{'s' if spread != 1 else ''}; heavy repeat activity is worth a look but is not proof of malice",
+                    tuple(Evidence("observation", o["id"]) for o in obs[ioc_id])))
         return hits
 
     base = {i: first_pass(i) for i in local}

@@ -376,4 +376,4 @@ tests/                   pytest suite
 
 ## License
 
-No license has been chosen yet, so all rights are reserved by default. Add a `LICENSE` file before sharing or accepting contributions.
+MIT. See [LICENSE](LICENSE).

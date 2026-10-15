@@ -261,6 +261,16 @@ def _cmd_adv_publish(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_ui(args: argparse.Namespace) -> int:
+    from .web.api import Context
+    from .web.server import serve
+
+    store.connect(args.db).close()  # create or migrate the database before serving it
+    serve(Context(db_path=args.db, out_dir=Path(args.out), cache_dir=args.cache_dir), port=args.port,
+          open_browser=not args.no_browser)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="threatweaver", description="Helps CERT analysts with repetitive investigative work. Read-only suggestions; humans decide.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -346,6 +356,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--actor", required=True)
     p.add_argument("--out", default="out/advisories")
     p.add_argument("--deny", action="append")
+
+    p = add("ui", "open the local dashboard in your browser (loopback only)", _cmd_ui)
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
+    p.add_argument("--out", default="out/advisories", help="where approved advisories are written")
+    p.add_argument("--cache-dir", default=DEFAULT_CACHE)
 
     args = parser.parse_args(argv)
     try:

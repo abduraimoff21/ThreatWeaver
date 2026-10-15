@@ -68,3 +68,5 @@ Decisions recorded while building:
 - URLhaus bulk exports now require a free abuse.ch Auth-Key (environment variable `URLHAUS_AUTH_KEY`); Feodo Tracker needs none.
 - Feed matching uses the newest snapshot of each feed; older snapshots are kept as history.
 - "Publishing" an advisory writes local files only; a person must approve at an interactive terminal.
+- A local dashboard (`threatweaver ui`) was added on request to replace command-line use. It is loopback-only, token-protected, and shows the same data and actions as the CLI; the human-approval rules for advisories are unchanged (typed phrase by a person, reviewer different from author).
+- Observations now store the log line around each sighting (display only; not included in reports or advisories).

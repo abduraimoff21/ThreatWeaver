@@ -17,6 +17,7 @@ ThreatWeaver is a research prototype. It reads logs and reports, finds IPs, doma
 - [How it works](#how-it-works)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Dashboard](#dashboard-no-commands-needed)
 - [Usage guide](#usage-guide)
 - [Reference](#reference)
 - [Safety and data handling](#safety-and-data-handling)
@@ -96,7 +97,7 @@ python -m pytest
 
 ## Quick start
 
-Everything below runs offline on bundled synthetic data.
+Everything below runs offline on bundled synthetic data. (Prefer a visual interface? Run `python -m threatweaver run data/synthetic/scenario --db demo.db --out out` once, then `python -m threatweaver ui --db demo.db`.)
 
 ```bash
 # 1. Extract indicators from a document
@@ -115,6 +116,43 @@ python -m threatweaver show ipv4 203.0.113.45 --db demo.db
 ```
 
 The synthetic data uses reserved documentation addresses (RFC 5737 / 3849) and `example.*` domains, so it is safe to share and experiment with.
+
+## Dashboard (no commands needed)
+
+Prefer clicking to typing? Start the local dashboard:
+
+```bash
+python -m threatweaver ui --db case.db
+```
+
+It prints a link like `http://127.0.0.1:8765/?token=...` and opens your browser. Open that exact link (it contains the access token). Press Ctrl+C in the terminal to stop it.
+
+| Page | What you can do |
+|------|-----------------|
+| **Overview** | Counts, a priority chart, **drag and drop log files** (or paste text) to add them, **download feeds** with one click, and see your sources. |
+| **Cases** | Groups of connected indicators, highest priority first. Quiet single-indicator cases are hidden unless you ask. |
+| **Indicators** | Search and filter by value, type, level or source. Click a row for the full explanation. |
+| **Link graph** | An interactive picture of what is connected. Shape shows the type, colour shows the level, line style shows why two things are linked. Click a node for details. |
+| **Report** | The traceability check, the report preview, and downloads (Markdown and JSON). |
+| **Advisories** | Draft from public evidence, run the confidentiality check, submit, review, approve and write the file, with the audit log. |
+| **Sources** | Every file and feed snapshot with its SHA-256. |
+
+Clicking any indicator opens a panel with the suggested level, **each rule that fired with its points and reason**, the feed record, connected indicators, and **the actual log lines where it appeared**. Indicators are shown defanged; tick "Show exact values" for the originals.
+
+Notes:
+
+- **URLhaus key:** the Download button for URLhaus is disabled until `URLHAUS_AUTH_KEY` is set in the terminal that starts the dashboard. The key is never shown in the browser or stored. Set it, then restart the dashboard.
+- **Feeds:** the Download / Update buttons ask for confirmation first, because they are the only thing that contacts the internet.
+- **Port:** the default is 8765. If it is busy, the next free port is used (check the printed link). `--port` chooses one, `--no-browser` only prints the link, `--out` sets where approved advisories are written (default `out/advisories`).
+- **Log lines:** the dashboard shows the log line around each sighting. Databases made by an older version are upgraded automatically, but their old sightings have no stored line until you re-ingest the file.
+
+How the dashboard protects you (it handles text that attackers may have influenced, and your browser may have other pages open):
+
+- It listens on `127.0.0.1` only and refuses to start on any other address.
+- Every request needs the random per-run token. Requests with a foreign `Host` or `Origin` are refused, so another web page (including DNS-rebinding tricks) cannot drive it. No CORS headers are ever sent.
+- A strict Content-Security-Policy allows scripts and styles only from the dashboard itself: no inline code, no framing, no outside connections.
+- Log and feed text is always inserted as plain text, never as HTML, and the page contains no code path that builds HTML from data. Tests enforce this.
+- Everything stays on your machine. Treat the terminal link like a password while the dashboard runs.
 
 ## Usage guide
 
@@ -188,12 +226,12 @@ python -m threatweaver advisory publish 1 --actor carol --db case.db --out out/a
 |---------|----------|
 | Content | Drafts contain only medium/high indicators that have a public feed record and a routable address, defanged. Local sightings, file names, internal hosts and user names are left out. |
 | Confidentiality check | Submission is refused while the text contains private/loopback addresses, internal host names (`.local .internal .corp .lan ...`), personal e-mail addresses, `confidential` / `TLP:AMBER` / `TLP:RED` markers, or any `--deny` term. There is no override: edit the text. |
-| Approval | Needs a reviewer different from the author, the content hash they reviewed, and the typed phrase `APPROVE <id>` at an interactive terminal. |
+| Approval | Needs a reviewer different from the author, the content hash they reviewed, and the typed phrase `APPROVE <id>`, typed at an interactive terminal or into the dashboard's approval box. Never a flag, never automatic. |
 | Integrity | Any edit voids approval. Publishing re-checks the hash and re-runs the confidentiality check. Published advisories are immutable. |
 | Audit | Every step is appended to an event log with the content hash. |
 | Output | "Publish" writes `.md` and `.json` files locally. Nothing is sent anywhere. |
 
-Names are self-asserted (there is no login), and a program could supply the approval phrase itself. The terminal prompt is the human gate; real separation of duties needs your own process and access controls.
+Names are self-asserted (there is no login), and a program holding the dashboard token or database could supply the approval phrase itself. The typed phrase is the human gate; real separation of duties needs your own process and access controls.
 
 ### Other commands
 
@@ -249,7 +287,7 @@ Levels: **high** at 50 or more, **medium** at 25, **low** at 10, otherwise **inf
 
 - **Public or synthetic data.** Fixtures use documentation address ranges and `example.*` domains. If you run it on real logs, those logs and the resulting `.db` file stay on your machine. Treat the database as sensitive: it contains the text surrounding every indicator.
 - **No automatic action.** Even a "high" verdict says containment is a human decision made through your normal change process.
-- **Controlled network use.** `feeds fetch` is the only code path that touches the network, and it is limited to the two feeds.
+- **Controlled network use.** `feeds fetch` (and the dashboard's confirmed Download buttons, which call it) is the only code path that touches the network, and it is limited to the two feeds. The dashboard itself listens on loopback only.
 - **Credentials.** The only secret is the URLhaus key, handled as described above.
 - **Reports are safe to paste.** Markdown output defangs every indicator. JSON keeps exact values for machines.
 - **Respect feed terms.** Check the [Feodo Tracker](https://feodotracker.abuse.ch/blocklist/) and [abuse.ch](https://abuse.ch/terms-of-use/) terms before redistributing feed data.
@@ -257,7 +295,7 @@ Levels: **high** at 50 or more, **medium** at 25, **low** at 10, otherwise **inf
 ## Testing and measured results
 
 ```bash
-python -m pytest                 # 202 tests (201 pass; 1 needs yara-python and is skipped without it)
+python -m pytest                 # 226 tests (225 pass; 1 needs yara-python and is skipped without it)
 python -m threatweaver evaluate  # extraction precision / recall
 python -m threatweaver evaluate --scenario
 ```
@@ -293,6 +331,12 @@ What the numbers cannot tell you is how it behaves on your logs. Run it on a cas
 - `same_line` is co-occurrence, not causation. `hostname_ip` relies on naming conventions and is a hint, not proof.
 - `shared_family` uses only Feodo's `malware` field, because URLhaus tags are not reliable family names.
 
+**Dashboard**
+- Single-user and local: one shared token, no accounts. Reviewer and author names are typed by the person using it.
+- The graph layout is computed once per view (drag nodes to adjust; it does not animate live), and the all-cases view shows at most the 300 highest-scoring linked indicators.
+- Pages refresh when you press Refresh or take an action, not continuously.
+- Verified in the Claude desktop app's built-in browser (dark theme); other browsers and the light theme have not been visually checked.
+
 **Rules harness**
 - The Sigma evaluator supports a documented subset: selections, `contains` / `startswith` / `endswith` / `re` / `cidr` / `all`, wildcards, and `and` / `or` / `not` / `1 of` / `all of` conditions. Aggregations, `near`, timeframes and other modifiers are refused.
 - The YARA adapter has only been tested against a stub on this project's development machine, because `yara-python` has no wheel for its Python version.
@@ -310,6 +354,7 @@ src/threatweaver/
   report.py              F  JSON / Markdown reports and traceability verifier
   rules.py               G  Sigma / YARA test harness
   advisory.py            H  advisory workflow
+  web/                   local dashboard: api.py (data), server.py (security + HTTP), static/ (page)
   pipeline.py evaluate.py scenario_eval.py benchmark.py cli.py
 data/synthetic/          labeled extraction corpus, scenario/ (logs + feed snapshots + labels), rules/
 tests/                   pytest suite
@@ -318,6 +363,7 @@ tests/                   pytest suite
 ## Development
 
 - Add a unit test with every behavior change. For realistic shapes, add a document to `data/synthetic/` and write its expected labels **by hand before running the code**. If code and labels disagree, decide which side is wrong rather than editing whichever is convenient.
+- The dashboard must keep rendering data as text only (no HTML string building), keep its Content-Security-Policy strict (no inline styles or scripts), and keep every API route behind the token.
 - Keep the core standard-library only. Optional backends must degrade to SKIPPED, never to a pass.
 - Do not add network calls outside `feeds/common.py`, an "auto-approve" path for advisories, or anything that acts on a system.
 - See [CLAUDE.md](CLAUDE.md) for the working rules used when developing with an AI coding assistant.

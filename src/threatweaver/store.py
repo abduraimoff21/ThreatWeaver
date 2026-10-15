@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS observations (
     line_no               INTEGER NOT NULL,
     defanged              INTEGER NOT NULL,
     parent_observation_id INTEGER REFERENCES observations(id),
+    context               TEXT,
     UNIQUE (source_id, ioc_id, span_start, span_end)
 );
 CREATE TABLE IF NOT EXISTS relations (
@@ -129,7 +130,30 @@ def connect(path: str | Path = ":memory:") -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring databases created by older versions up to the current schema."""
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(observations)")}
+    if "context" not in columns:
+        with conn:
+            conn.execute("ALTER TABLE observations ADD COLUMN context TEXT")
+
+
+CONTEXT_CHARS = 200
+NEWLINE = chr(10)
+CARRIAGE_RETURN = chr(13)
+
+
+def _context(text: str, start: int, end: int) -> str:
+    """The log line around a sighting (at most ~400 characters), for display only."""
+    line_start = text.rfind(NEWLINE, 0, start) + 1
+    line_end = text.find(NEWLINE, end)
+    line_end = len(text) if line_end == -1 else line_end
+    a, b = max(line_start, start - CONTEXT_CHARS), min(line_end, end + CONTEXT_CHARS)
+    return text[a:b].strip(CARRIAGE_RETURN)
 
 
 def _now() -> str:
@@ -177,10 +201,11 @@ def ingest_text(
             parent = obs_ids.get(id(cand.derived_from)) if cand.derived_from else None
             cur = conn.execute(
                 "INSERT OR IGNORE INTO observations "
-                "(ioc_id, source_id, raw, span_start, span_end, line_no, defanged, parent_observation_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(ioc_id, source_id, raw, span_start, span_end, line_no, defanged, parent_observation_id, context) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (ioc_id, source_id, cand.raw, cand.start, cand.end,
-                 bisect_right(newlines, cand.start - 1) + 1, int(cand.defanged), parent),
+                 bisect_right(newlines, cand.start - 1) + 1, int(cand.defanged), parent,
+                 _context(text, cand.start, cand.end)),
             )
             if cur.rowcount:
                 new_obs += 1

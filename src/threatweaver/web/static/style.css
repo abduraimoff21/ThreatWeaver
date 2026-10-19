@@ -120,3 +120,12 @@ pre.md { white-space: pre-wrap; word-break: break-word; font-family: var(--mono)
   .nav { display: flex; flex-wrap: wrap; gap: .25rem; } .nav a { margin: 0; }
   .main { padding: 1rem; }
 }
+
+textarea.short { min-height: 6rem; }
+details { margin-top: .75rem; }
+.activity { display: grid; gap: .5rem; margin-bottom: 1rem; }
+.activity:empty { display: none; }
+.job { background: var(--panel); border: 1px solid var(--border); border-left: 5px solid var(--accent); border-radius: 8px; padding: .55rem .85rem; }
+.job.done { border-left-color: var(--ok); } .job.error { border-left-color: var(--bad); }
+.progress { background: var(--panel-2); border-radius: 5px; height: 10px; overflow: hidden; margin-top: .4rem; }
+.progress > div { height: 100%; background: var(--accent); transition: width .3s; }

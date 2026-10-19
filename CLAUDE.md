@@ -14,6 +14,8 @@ Modules A-H are built. Further work should be driven by real-data feedback, not 
 - The URLhaus Auth-Key comes from `URLHAUS_AUTH_KEY` and must never be stored, logged or put in an error message.
 - Advisories: no bypass of the confidentiality check, reviewer != author, hash-locked approval, a typed `APPROVE <id>` phrase entered by a person (terminal prompt or dashboard box). Do not add an "auto-approve" or `--yes` path, and never approve or publish an advisory on a user's behalf, including through the dashboard API.
 - Dashboard (`web/`): loopback only, token on every API route, Host/Origin checks, strict CSP with no inline code or styles, and data rendered with textContent only (no innerHTML). Log text and feed fields are attacker-influenced. Never put the URLhaus key in any response.
+- Scale: ingest reads files in chunks (never the whole file), and correlation, triage and the report must not hold every sighting in memory or do work proportional to cases x links. Memory may grow with distinct indicators, not with log size. `tests/test_analysis_scale.py` and `tests/test_streaming_ingest.py` enforce this; keep them passing and do not loosen their thresholds to make a change fit.
+- Uploads (`/api/upload`) stream to disk and run as background jobs; keep them token-protected, size-capped, and drained on early refusal (`_drain`).
 - Provenance must point at the original text, not the refanged text. Reports defang indicators in Markdown.
 - Normalization is conservative: never reorder query strings or change path case.
 - Standard library only in the core; yaml/yara/networkx stay optional and degrade to SKIPPED, never to a pass.

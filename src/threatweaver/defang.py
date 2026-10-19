@@ -9,6 +9,7 @@ original text it came from.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from dataclasses import dataclass
 
 _DEFANGED = re.compile(
@@ -25,36 +26,53 @@ _DEFANGED = re.compile(
 
 @dataclass(frozen=True)
 class Refanged:
+    """The refanged text plus a map back to the original.
+
+    Only the rewritten segments are stored (one entry per `[.]`, `hxxp`, ...), not one entry per
+    character, so memory does not grow with the size of the input. Outside a rewrite, a refanged
+    character sits at a constant offset from its original position.
+    """
+
     text: str
-    _starts: list[int]  # original start offset of each refanged character
-    _ends: list[int]  # original end offset (exclusive) of each refanged character
-    _changed: list[tuple[int, int]]  # refanged-text intervals produced by a rewrite
+    _out_start: list[int]  # refanged-text start of each rewrite (sorted, disjoint)
+    _out_end: list[int]
+    _orig_start: list[int]  # the original text each rewrite replaced
+    _orig_end: list[int]
+
+    def _char(self, p: int) -> tuple[int, int]:
+        """Original (start, end) of the single refanged character at index `p`."""
+        i = bisect_right(self._out_start, p) - 1
+        if i >= 0:
+            if p < self._out_end[i]:
+                return self._orig_start[i], self._orig_end[i]
+            delta = self._orig_end[i] - self._out_end[i]
+        else:
+            delta = 0
+        return p + delta, p + delta + 1
 
     def original_span(self, start: int, end: int) -> tuple[int, int]:
         """Map a [start, end) span of `text` back to the original input."""
-        return self._starts[start], self._ends[end - 1]
+        return self._char(start)[0], self._char(end - 1)[1]
 
     def was_defanged(self, start: int, end: int) -> bool:
-        return any(a < end and start < b for a, b in self._changed)
+        """True if any part of [start, end) came from a rewrite."""
+        i = bisect_right(self._out_start, end - 1) - 1
+        return i >= 0 and self._out_end[i] > start
 
 
 def refang(original: str) -> Refanged:
     parts: list[str] = []
-    starts: list[int] = []
-    ends: list[int] = []
-    changed: list[tuple[int, int]] = []
+    out_start: list[int] = []
+    out_end: list[int] = []
+    orig_start: list[int] = []
+    orig_end: list[int] = []
     out_len = 0
     pos = 0
 
-    def keep(a: int, b: int) -> None:
-        nonlocal out_len
-        parts.append(original[a:b])
-        starts.extend(range(a, b))
-        ends.extend(range(a + 1, b + 1))
-        out_len += b - a
-
     for m in _DEFANGED.finditer(original):
-        keep(pos, m.start())
+        plain = original[pos:m.start()]
+        parts.append(plain)
+        out_len += len(plain)
         if m.group("scheme"):
             rep = "http" + m.group("s")
         elif m.group("dot"):
@@ -66,13 +84,14 @@ def refang(original: str) -> Refanged:
         else:
             rep = "@"
         parts.append(rep)
-        starts.extend([m.start()] * len(rep))
-        ends.extend([m.end()] * len(rep))
-        changed.append((out_len, out_len + len(rep)))
+        out_start.append(out_len)
+        out_end.append(out_len + len(rep))
+        orig_start.append(m.start())
+        orig_end.append(m.end())
         out_len += len(rep)
         pos = m.end()
-    keep(pos, len(original))
-    return Refanged("".join(parts), starts, ends, changed)
+    parts.append(original[pos:])
+    return Refanged("".join(parts), out_start, out_end, orig_start, orig_end)
 
 
 def defang(value: str) -> str:

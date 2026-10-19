@@ -57,7 +57,8 @@ class RuleHit:
     rule: str
     points: int
     reason: str
-    evidence: tuple[Evidence, ...]
+    evidence: tuple[Evidence, ...]  # may be only the first few items; see evidence_total
+    evidence_total: int | None = None  # true number of evidence items when `evidence` is a sample
 
 
 @dataclass(frozen=True)
@@ -84,15 +85,49 @@ def _action(level: str) -> str:
     }[level]
 
 
+EVIDENCE_SAMPLE = 20  # evidence ids kept per rule hit; the true count travels in RuleHit.evidence_total
+
+
+@dataclass(frozen=True)
+class _Stats:
+    count: int = 0
+    sources: int = 0
+    first_ids: tuple[int, ...] = ()
+    defanged_count: int = 0
+    first_defanged_ids: tuple[int, ...] = ()
+
+
+def _observation_stats(conn: sqlite3.Connection) -> defaultdict:
+    """Everything triage needs to know about sightings, gathered by SQL so memory does not grow with them."""
+    n: dict[int, tuple[int, int]] = {
+        r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT ioc_id, COUNT(*), COUNT(DISTINCT source_id) FROM observations GROUP BY ioc_id")}
+    first: dict[int, list[int]] = defaultdict(list)
+    for ioc_id, obs_id in conn.execute(
+        "SELECT ioc_id, id FROM (SELECT ioc_id, id, ROW_NUMBER() OVER (PARTITION BY ioc_id ORDER BY id) AS rn "
+        "FROM observations) WHERE rn <= ? ORDER BY ioc_id, id", (EVIDENCE_SAMPLE,)):
+        first[ioc_id].append(obs_id)
+    dcount: dict[int, int] = {r[0]: r[1] for r in conn.execute(
+        "SELECT ioc_id, COUNT(*) FROM observations WHERE defanged = 1 AND parent_observation_id IS NULL GROUP BY ioc_id")}
+    dfirst: dict[int, list[int]] = defaultdict(list)
+    for ioc_id, obs_id in conn.execute(
+        "SELECT ioc_id, id FROM (SELECT ioc_id, id, ROW_NUMBER() OVER (PARTITION BY ioc_id ORDER BY id) AS rn "
+        "FROM observations WHERE defanged = 1 AND parent_observation_id IS NULL) WHERE rn <= ? ORDER BY ioc_id, id",
+        (EVIDENCE_SAMPLE,)):
+        dfirst[ioc_id].append(obs_id)
+    stats: defaultdict = defaultdict(_Stats)
+    for ioc_id, (count, sources) in n.items():
+        stats[ioc_id] = _Stats(count, sources, tuple(first[ioc_id]), dcount.get(ioc_id, 0), tuple(dfirst[ioc_id]))
+    return stats
+
+
 def triage(conn: sqlite3.Connection, result: CorrelationResult | None = None) -> dict[int, Verdict]:
     """Score every local indicator. Deterministic for a given database."""
     result = result or correlate(conn)
     iocs = {r["id"]: r for r in conn.execute("SELECT id, type, value, attrs FROM iocs")}
     local = [r["ioc_id"] for r in conn.execute("SELECT DISTINCT ioc_id FROM observations ORDER BY ioc_id")]
 
-    obs = defaultdict(list)
-    for o in conn.execute("SELECT id, ioc_id, source_id, defanged, parent_observation_id FROM observations ORDER BY id"):
-        obs[o["ioc_id"]].append(o)
+    stats = _observation_stats(conn)  # per-indicator counts and the first few ids: O(indicators), not O(sightings)
     matches = defaultdict(list)
     for m in result.matches:
         matches[m.ioc_id].append(m)
@@ -124,23 +159,22 @@ def triage(conn: sqlite3.Connection, result: CorrelationResult | None = None) ->
             if hosted_online:
                 hits.append(RuleHit("TW-T05", 10, "at least one of those URLs is listed online",
                                     tuple(Evidence("intel", m.intel_id) for m in hosted_online)))
-        sources = {o["source_id"] for o in obs[ioc_id]}
-        if len(sources) >= 2:
-            hits.append(RuleHit("TW-T06", 10, f"seen in {len(sources)} different local sources",
-                                tuple(Evidence("observation", o["id"]) for o in obs[ioc_id])))
-        defanged = [o for o in obs[ioc_id] if o["defanged"] and o["parent_observation_id"] is None]
-        if defanged:
+        st = stats[ioc_id]
+        spread = st.sources
+        if spread >= 2:
+            hits.append(RuleHit("TW-T06", 10, f"seen in {spread} different local sources",
+                                tuple(Evidence("observation", i) for i in st.first_ids), st.count))
+        if st.defanged_count:
             hits.append(RuleHit("TW-T07", 10, "written defanged in a source document",
-                                tuple(Evidence("observation", o["id"]) for o in defanged)))
+                                tuple(Evidence("observation", i) for i in st.first_defanged_ids), st.defanged_count))
         if iocs[ioc_id]["type"] in VOLUME_TYPES:
-            count = len(obs[ioc_id])
+            count = st.count
             tier = next((pts for floor, pts in VOLUME_TIERS if count >= floor), None)
             if tier:
-                spread = len(sources)
                 hits.append(RuleHit(
                     "TW-T10", tier,
                     f"seen {count:,} times across {spread} source{'s' if spread != 1 else ''}; heavy repeat activity is worth a look but is not proof of malice",
-                    tuple(Evidence("observation", o["id"]) for o in obs[ioc_id])))
+                    tuple(Evidence("observation", i) for i in st.first_ids), st.count))
         return hits
 
     base = {i: first_pass(i) for i in local}
@@ -158,8 +192,11 @@ def triage(conn: sqlite3.Connection, result: CorrelationResult | None = None) ->
         risky = [(n, l) for n, l in neighbours[i] if base_level.get(n) == "high"]
         if risky:
             label = ", ".join(sorted(f"{iocs[n]['type']} {defang(iocs[n]['value'])}" for n, _ in risky))
+            union = {e for _, l in risky for e in l.evidence}
+            truncated = any(l.evidence_total not in (None, len(l.evidence)) for _, l in risky)
+            total = sum(l.evidence_total or len(l.evidence) for _, l in risky) if truncated else len(union)
             hits.append(RuleHit("TW-T08", 15, f"linked to high-risk indicator(s): {label}",
-                                tuple(e for _, l in risky for e in l.evidence)))
+                                tuple(sorted(union, key=lambda e: (e.kind, e.id))), total))
         score = sum(h.points for h in hits)
         scope = json.loads(iocs[i]["attrs"]).get("scope", "")
         if scope in NON_ROUTABLE:

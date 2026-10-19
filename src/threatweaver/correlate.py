@@ -31,7 +31,7 @@ import re
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
-from itertools import combinations
+from itertools import combinations, groupby
 from typing import Any
 
 RULES: dict[str, tuple[int, str]] = {
@@ -44,6 +44,7 @@ CLUSTER_MIN_WEIGHT = 2
 MAX_IOCS_PER_LINE = 8
 MAX_FAMILY_GROUP = 25
 MAX_HOSTNAME_EVIDENCE = 10
+LINK_EVIDENCE_CAP = 1000  # evidence ids kept per link; the real count is still recorded in evidence_total
 
 _SEPARATED_OCTETS = re.compile(r"(?=(?<!\d)(\d{1,3})([-.])(\d{1,3})\2(\d{1,3})\2(\d{1,3})(?!\d))")
 _PACKED_OCTETS = re.compile(r"(?<!\d)(\d{3})(\d{3})(\d{3})(\d{3})(?!\d)")
@@ -65,6 +66,7 @@ class Link:
     b: int
     explanation: str
     evidence: tuple[Evidence, ...]
+    evidence_total: int | None = None  # true number of evidence items when `evidence` was capped
 
     @property
     def weight(self) -> int:
@@ -131,13 +133,17 @@ def correlate(
         ))
 
     # --- same_line -------------------------------------------------------
-    by_line: dict[tuple[int, int], list[sqlite3.Row]] = defaultdict(list)
-    for o in conn.execute(
-        "SELECT id, ioc_id, source_id, line_no, span_start, span_end FROM observations ORDER BY id"
-    ):
-        by_line[(o["source_id"], o["line_no"])].append(o)
-    line_pairs: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for (_, _), obs in sorted(by_line.items()):
+    # Observations arrive ordered by (source, line), so each line's group is processed and dropped:
+    # memory stays flat however large the input is.
+    line_pairs: dict[tuple[int, int], dict[int, None]] = {}
+    line_overflow: dict[tuple[int, int], int] = {}
+    rows = conn.execute(
+        "SELECT id, ioc_id, source_id, line_no, span_start, span_end FROM observations ORDER BY source_id, line_no, id"
+    )
+    for _, group in groupby(rows, key=lambda o: (o["source_id"], o["line_no"])):
+        obs = list(group)
+        if len(obs) < 2:
+            continue
         if len({o["ioc_id"] for o in obs}) > max_per_line:
             out.skipped_lines += 1
             continue
@@ -149,24 +155,33 @@ def correlate(
             pair = _pair(o1["ioc_id"], o2["ioc_id"])
             if pair in host_pairs:
                 continue  # already explained by url_host
-            line_pairs[pair].extend([o1["id"], o2["id"]])
-    for (a, b), obs_ids in sorted(line_pairs.items()):
+            kept = line_pairs.setdefault(pair, {})
+            for obs_id in (o1["id"], o2["id"]):
+                if obs_id in kept:
+                    continue
+                if len(kept) < LINK_EVIDENCE_CAP:
+                    kept[obs_id] = None
+                else:
+                    line_overflow[pair] = line_overflow.get(pair, 0) + 1
+    for (a, b), kept in sorted(line_pairs.items()):
+        extra = line_overflow.get((a, b), 0)
         out.links.append(Link(
             "same_line", a, b, f"{label[a]} and {label[b]} appear on the same line",
-            tuple(Evidence("observation", i) for i in sorted(set(obs_ids))),
+            tuple(Evidence("observation", i) for i in sorted(kept)),
+            evidence_total=len(kept) + extra if extra else None,
         ))
 
     # --- hostname_ip -----------------------------------------------------
-    sightings: dict[int, list[int]] = defaultdict(list)
-    for o in conn.execute("SELECT id, ioc_id FROM observations ORDER BY id"):
-        sightings[o["ioc_id"]].append(o["id"])
+    def first_sightings(ioc_id: int, limit: int) -> list[int]:
+        return [r[0] for r in conn.execute("SELECT id FROM observations WHERE ioc_id = ? ORDER BY id LIMIT ?", (ioc_id, limit))]
+
     local_ips = {r["value"]: r["id"] for r in conn.execute("SELECT id, value FROM iocs WHERE type = 'ipv4'") if r["id"] in local}
     for r in conn.execute("SELECT id, value FROM iocs WHERE type = 'domain' ORDER BY id"):
         if r["id"] not in local:
             continue
         for ip in sorted(encoded_ipv4_candidates(r["value"]) & local_ips.keys()):
             a, b = _pair(r["id"], local_ips[ip])
-            evidence = sightings[r["id"]][:MAX_HOSTNAME_EVIDENCE] + sightings[local_ips[ip]][:1]
+            evidence = first_sightings(r["id"], MAX_HOSTNAME_EVIDENCE) + first_sightings(local_ips[ip], 1)
             out.links.append(Link(
                 "hostname_ip", a, b, f"{label[r['id']]} spells out the address {ip}, which was also observed",
                 tuple(Evidence("observation", i) for i in evidence),

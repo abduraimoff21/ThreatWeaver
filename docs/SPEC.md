@@ -70,3 +70,5 @@ Decisions recorded while building:
 - "Publishing" an advisory writes local files only; a person must approve at an interactive terminal.
 - A local dashboard (`threatweaver ui`) was added on request to replace command-line use. It is loopback-only, token-protected, and shows the same data and actions as the CLI; the human-approval rules for advisories are unchanged (typed phrase by a person, reviewer different from author).
 - Observations now store the log line around each sighting (display only; not included in reports or advisories).
+- Large inputs: files up to 1 GB are accepted by the dashboard (streamed to disk, ingested in chunks as a background job). Ingest memory is bounded; analysis memory is bounded by the number of distinct indicators, not by log size.
+- A source's SHA-256 is now the hash of the file's raw bytes (line endings preserved), so it matches `Get-FileHash`.

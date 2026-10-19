@@ -68,6 +68,7 @@ def web(ctx):
     yield client
     server.shutdown()
     server.server_close()
+    ctx.close()
 
 
 @pytest.fixture
@@ -144,7 +145,7 @@ def test_oversized_and_malformed_bodies(web, monkeypatch):
     assert web.request("POST", "/api/ingest", raw_body=b"[1,2]")[0] == 400
     status, _, _ = web.request("POST", "/api/ingest", headers={"Content-Length": str(10 ** 9), "Content-Type": "application/json"})
     assert status == 413
-    monkeypatch.setattr(api, "MAX_UPLOAD_BYTES", 100)
+    monkeypatch.setattr(api, "MAX_PASTE_BYTES", 100)
     assert web.post("/api/ingest", {"name": "big.txt", "text": "x" * 500})[0] == 413
 
 
@@ -373,3 +374,266 @@ def test_a_huge_report_is_previewed_not_dumped(ctx):
         assert len(web.request("GET", "/api/report.md")[2]) > len(r["preview"])
     finally:
         server.shutdown()
+
+
+# ------------------------------------------------------------- large uploads: streamed to disk, ingested in the background
+import socket
+import time
+from types import SimpleNamespace
+
+OCTET = {"Content-Type": "application/octet-stream"}
+
+
+def upload(web, name, data, **kw):
+    status, headers, body = web.request("POST", f"/api/upload?name={name}", raw_body=data, headers=dict(OCTET, **kw.pop("headers", {})), **kw)
+    return status, (json.loads(body) if body else None)
+
+
+def wait_idle(web, timeout=20):
+    end = time.time() + timeout
+    while time.time() < end:
+        _, jobs = web.get("/api/jobs")
+        if jobs["active"] == 0:
+            return jobs
+        time.sleep(0.05)
+    raise AssertionError("jobs did not finish")
+
+
+def log_bytes(lines=2000):
+    return "".join(f"2026-10-14 proxy GET http://198.51.100.{i % 200 + 1}/p{i}.bin dst=203.0.113.{i % 250 + 1}\n" for i in range(lines)).encode()
+
+
+def upload_dir_files(ctx):
+    return sorted(ctx.jobs().work_dir.iterdir())
+
+
+def test_the_upload_limit_is_one_gigabyte_and_pasted_text_stays_small():
+    assert api.MAX_UPLOAD_BYTES == 1024 ** 3 and api.MAX_PASTE_BYTES == 20 * 1024 * 1024
+
+
+def test_overview_tells_the_page_the_limits(web):
+    assert web.get("/api/overview")[1]["limits"] == {"upload_bytes": 1024 ** 3, "paste_bytes": 20 * 1024 * 1024}
+
+
+def test_a_file_is_streamed_to_disk_ingested_in_the_background_and_the_temp_copy_removed(web, ctx):
+    data = log_bytes(2000)
+    status, res = upload(web, "proxy.log", data)
+    assert status == 202 and res["job"]["name"] == "proxy.log" and res["job"]["size"] == len(data)
+    jobs = wait_idle(web)
+    (job,) = jobs["jobs"]
+    assert job["state"] == "done" and job["percent"] == 100.0 and job["result"]["new_indicators"] > 400 and job["error"] is None
+    _, o = web.get("/api/overview")
+    assert o["summary"]["indicators"] == job["result"]["new_indicators"] and o["sources"][0]["name"] == "proxy.log"
+    assert upload_dir_files(ctx) == []  # nothing left behind
+    assert upload(web, "proxy.log", data)[0] == 202 and wait_idle(web)["jobs"][0]["result"]["already_ingested"] is True
+
+
+def test_upload_sha256_is_the_files_own_hash(web):
+    import hashlib
+
+    data = log_bytes(50).replace(b"\n", b"\r\n")  # Windows line endings preserved
+    upload(web, "crlf.log", data)
+    wait_idle(web)
+    assert web.get("/api/overview")[1]["sources"][0]["sha256"] == hashlib.sha256(data).hexdigest()
+
+
+def test_upload_validation_and_name_sanitising(web, monkeypatch):
+    assert upload(web, "", b"x")[0] == 400
+    assert upload(web, "a.log", b"")[0] == 400
+    assert web.request("POST", "/api/upload?name=a.log", headers=OCTET)[0] in (400, 411)  # no length / no body
+    status, _ = upload(web, "..%2F..%2Fetc%2Fevil.log", b"seen 203.0.113.9\n")
+    assert status == 202
+    wait_idle(web)
+    assert web.get("/api/overview")[1]["sources"][0]["name"] == "evil.log"
+    monkeypatch.setattr(api, "MAX_UPLOAD_BYTES", 1000)
+    assert upload(web, "big.log", b"x" * 1001)[0] == 413
+    assert upload(web, "ok.log", b"seen 203.0.113.10 " + b" " * 900)[0] == 202
+
+
+def test_upload_needs_token_host_origin_and_the_right_content_type(web, ctx):
+    data = log_bytes(5)
+    assert upload(web, "a.log", data, token=False)[0] == 403
+    assert upload(web, "a.log", data, token="wrong")[0] == 403
+    assert upload(web, "a.log", data, host="evil.example")[0] == 403
+    assert upload(web, "a.log", data, headers={"Origin": "http://evil.example"})[0] == 403
+    status, _, _ = web.request("POST", "/api/upload?name=a.log", raw_body=data, headers={"Content-Type": "application/json"})
+    assert status == 415
+    status, _, _ = web.request("POST", "/api/upload?name=a.log", raw_body=data, headers={"Content-Type": "text/plain"})
+    assert status == 415
+    assert web.get("/api/jobs", token=False)[0] == 403
+    assert web.get("/api/jobs", host="evil.example")[0] == 403
+    assert web.get("/api/jobs")[1] == {"jobs": [], "active": 0}
+    assert not (ctx._jobs and upload_dir_files(ctx))  # rejected requests never touched the disk
+
+
+def test_not_enough_disk_space_is_refused_before_anything_is_written(web, ctx, monkeypatch):
+    from threatweaver.web import server
+
+    monkeypatch.setattr(server.shutil, "disk_usage", lambda p: SimpleNamespace(total=10 ** 9, used=0, free=1000))
+    status, res = upload(web, "a.log", log_bytes(10))
+    assert status == 507 and "disk space" in res["error"] and upload_dir_files(ctx) == []
+
+
+def test_a_cut_short_upload_is_discarded_and_the_server_keeps_working(web, ctx):
+    sock = socket.create_connection(("127.0.0.1", web.port), timeout=5)
+    sock.sendall((f"POST /api/upload?name=cut.log HTTP/1.1\r\nHost: 127.0.0.1:{web.port}\r\nX-TW-Token: {web.token}\r\n"
+                  "Content-Type: application/octet-stream\r\nContent-Length: 100000\r\n\r\n").encode() + b"only a little data")
+    sock.close()  # the browser tab was closed mid-upload
+    time.sleep(0.5)
+    assert upload_dir_files(ctx) == [] and web.get("/api/jobs")[1]["jobs"] == []
+    assert upload(web, "after.log", b"seen 203.0.113.9\n")[0] == 202
+
+
+def slow_ingest(started, release):
+    """Stands in for a long ingest that holds the database write lock, like the real one does."""
+    def run(conn, path, source_name=None, progress=None, **kw):
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("INSERT INTO sources (name, kind, content_sha256, ingested_at) VALUES (?, 'file', 'h', 't')", (source_name,))
+        size = path.stat().st_size
+        progress(size // 2, size)
+        started.set()
+        release.wait(20)
+        conn.rollback()
+        return SimpleNamespace(already_ingested=False, candidates=1, new_iocs=1, new_observations=1, rejected=0)
+    return run
+
+
+def test_while_a_big_file_is_processed_reads_work_writes_are_politely_refused_and_progress_is_reported(ctx):
+    import threading
+
+    from threatweaver.web.jobs import JobManager
+
+    store.connect(ctx.db_path).close()
+    load = store.connect(ctx.db_path)
+    store.ingest_text(load, "already here 198.51.100.7", "old.log")
+    load.close()
+    started, release = threading.Event(), threading.Event()
+    ctx._jobs = JobManager(ctx.db_path, ingest=slow_ingest(started, release))
+    server, web = start(ctx)
+    try:
+        assert upload(web, "huge.log", b"x" * 4000)[0] == 202
+        assert started.wait(10)
+        _, jobs = web.get("/api/jobs")
+        (job,) = jobs["jobs"]
+        assert jobs["active"] == 1 and job["state"] == "processing" and job["percent"] == 50.0 and job["result"] is None
+
+        # reads keep working on the last committed data
+        assert web.get("/api/overview")[1]["summary"]["indicators"] == 1
+        assert web.get("/api/indicators")[0] == 200 and web.get("/api/cases")[0] == 200 and web.get("/api/report")[0] == 200
+        # writes are refused with a clear message instead of timing out against the lock
+        for status, body in (web.post("/api/ingest", {"name": "p.txt", "text": "x 203.0.113.9"}),
+                             web.post("/api/feeds/fetch", {"feed": "feodotracker"}),
+                             web.post("/api/advisory/draft", {"author": "alice"}),
+                             web.post("/api/advisory/1/submit", {"actor": "alice"})):
+            assert status == 409 and "still being processed" in body["error"]
+        release.set()
+        assert wait_idle(web)["jobs"][0]["state"] == "done"
+        assert web.post("/api/ingest", {"name": "p.txt", "text": "x 203.0.113.9"})[0] == 200  # writes work again
+    finally:
+        release.set()
+        server.shutdown()
+        ctx.close()
+
+
+def test_a_failing_job_reports_why_cleans_up_and_does_not_block_the_next_one(ctx):
+    from threatweaver.web.jobs import JobManager
+
+    store.connect(ctx.db_path).close()
+    calls = []
+
+    def flaky(conn, path, source_name=None, progress=None, **kw):
+        calls.append(source_name)
+        if len(calls) == 1:
+            raise OSError("disk exploded (simulated)")
+        return SimpleNamespace(already_ingested=False, candidates=0, new_iocs=0, new_observations=0, rejected=0)
+
+    ctx._jobs = JobManager(ctx.db_path, ingest=flaky)
+    server, web = start(ctx)
+    try:
+        upload(web, "bad.log", b"x" * 10)
+        upload(web, "good.log", b"y" * 10)
+        jobs = {j["name"]: j for j in wait_idle(web)["jobs"]}
+        assert jobs["bad.log"]["state"] == "error" and "disk exploded" in jobs["bad.log"]["error"]
+        assert jobs["good.log"]["state"] == "done"
+        assert upload_dir_files(ctx) == []
+    finally:
+        server.shutdown()
+        ctx.close()
+
+
+def test_jobs_run_one_at_a_time_in_order_and_the_queue_is_bounded(ctx):
+    import threading
+
+    from threatweaver.web import jobs as jobs_module
+    from threatweaver.web.jobs import JobManager
+
+    store.connect(ctx.db_path).close()
+    order, gate = [], threading.Event()
+
+    def ordered(conn, path, source_name=None, progress=None, **kw):
+        order.append(source_name)
+        gate.wait(10)
+        return SimpleNamespace(already_ingested=False, candidates=0, new_iocs=0, new_observations=0, rejected=0)
+
+    jm = JobManager(ctx.db_path, ingest=ordered)
+    ctx._jobs = jm
+    for n in range(3):
+        path = jm.new_upload_path()
+        path.write_bytes(b"x")
+        jm.submit(f"f{n}.log", path, 1)
+    time.sleep(0.3)
+    assert order == ["f0.log"]  # the others wait their turn
+    gate.set()
+    assert jm.wait(10) and order == ["f0.log", "f1.log", "f2.log"]
+    assert not jm.busy() and list(jm.work_dir.iterdir()) == []
+    jm.close()
+
+
+def test_the_page_shows_upload_progress_and_polls_jobs_without_building_html():
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "/api/upload" in js and "xhr.upload" in js and "/api/jobs" in js and "application/octet-stream" in js
+    assert ".text()" not in js and "FileReader" not in js  # a big file is never read into the page
+
+
+def test_an_early_refusal_with_a_big_body_still_delivers_its_message(web, ctx, monkeypatch):
+    """Replying and closing with the upload unread makes the OS reset the connection; the browser then shows
+    a network error instead of 'not enough disk space'. The server must swallow the rest of the body first."""
+    from threatweaver.web import server
+
+    monkeypatch.setattr(server.shutil, "disk_usage", lambda p: SimpleNamespace(total=10 ** 9, used=0, free=1000))
+    big = b"x" * (6 * 1024 * 1024)
+    for _ in range(5):
+        status, res = upload(web, "huge.log", big)
+        assert status == 507 and "disk space" in res["error"]
+    monkeypatch.undo()
+    monkeypatch.setattr(api, "MAX_UPLOAD_BYTES", 1000)
+    for _ in range(5):
+        status, res = upload(web, "huge.log", b"y" * 600_000)
+        assert status == 413 and "larger" in res["error"]
+    assert upload_dir_files(ctx) == []
+
+
+def test_cases_are_paged_and_quiet_ones_hidden_by_the_server(web):
+    text = "".join(f"seen 11.0.{i // 250}.{i % 250 + 1}\n" for i in range(450)) + "linked 198.51.100.1 evil.example.com\n"
+    web.post("/api/ingest", {"name": "many.log", "text": text})
+    _, first = web.get("/api/cases")
+    assert first["all_cases"] == 451 and first["quiet_cases"] == 450 and first["total"] == 1  # only the linked case is shown
+    assert first["cases"][0]["links"] == 1 and len(first["cases"]) == 1
+
+    _, quiet = web.get("/api/cases?quiet=1")
+    assert quiet["total"] == 451 and len(quiet["cases"]) == 200 and quiet["limit"] == 200 and quiet["offset"] == 0
+    _, page2 = web.get("/api/cases?quiet=1&offset=200&limit=200")
+    _, page3 = web.get("/api/cases?quiet=1&offset=400&limit=200")
+    ids = [c["case_id"] for p in (quiet, page2, page3) for c in p["cases"]]
+    assert len(ids) == 451 and len(set(ids)) == 451  # pages neither overlap nor skip
+    clamped = web.get("/api/cases?quiet=1&limit=9999")[1]
+    assert clamped["limit"] == 500 and len(clamped["cases"]) == 451  # the page size is capped at 500
+    assert web.get("/api/cases?limit=abc&offset=-3")[0] == 200
+    assert all(len(c["indicators"]) <= 6 for c in quiet["cases"])  # a card needs only a few; the full list is on the case page
+
+
+def test_indicator_search_still_finds_quiet_indicators_that_the_cases_page_hides(web):
+    web.post("/api/ingest", {"name": "q.log", "text": "seen 11.9.9.9\nlinked 198.51.100.1 evil.example.com\n"})
+    assert web.get("/api/cases")[1]["total"] == 1
+    _, found = web.get("/api/indicators?q=11.9.9.9")
+    assert found["total"] == 1 and found["rows"][0]["value"] == "11.9.9.9"

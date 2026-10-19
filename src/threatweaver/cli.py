@@ -56,10 +56,29 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     return 0
 
 
+PROGRESS_FROM_BYTES = 32 * 1024 * 1024  # smaller files finish too quickly to need a progress line
+
+
+def progress_printer(name: str, total: int, out=None):
+    """A progress callback that prints a line each time another 5% of a large file is done."""
+    out = out or sys.stderr
+    last = [-1]
+
+    def show(done: int, _total: int) -> None:
+        pct = 100 if total == 0 else int(100 * done / total)
+        if pct // 5 != last[0] // 5 or pct == 100 and last[0] != 100:
+            last[0] = pct
+            print(f"  {name}: {pct}%", file=out, flush=True)
+
+    return show
+
+
 def _cmd_ingest(args: argparse.Namespace) -> int:
     conn = _db(args)
     for path in args.files:
-        res = store.ingest_file(conn, path)
+        size = Path(path).stat().st_size
+        progress = progress_printer(Path(path).name, size) if size >= PROGRESS_FROM_BYTES else None
+        res = store.ingest_path(conn, path, progress=progress)
         if res.already_ingested:
             print(f"{path}: already ingested, skipped")
         else:

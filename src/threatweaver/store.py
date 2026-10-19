@@ -11,10 +11,12 @@ Ingesting the same source content twice is a no-op.
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import sqlite3
 from bisect import bisect_right
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -126,9 +128,14 @@ class IngestResult:
 
 
 def connect(path: str | Path = ":memory:") -> sqlite3.Connection:
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    if str(path) != ":memory:":
+        # WAL lets the dashboard keep reading while a large file is being ingested in one transaction.
+        if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+            conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
     conn.executescript(SCHEMA)
     _migrate(conn)
     return conn
@@ -160,6 +167,84 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+CHUNK_BYTES = 4 * 1024 * 1024  # text is processed this much at a time, always ending on a line boundary
+MAX_LINE_BYTES = 64 * 1024 * 1024  # a "line" longer than this is split at whitespace instead of growing without limit
+IOC_CACHE_LIMIT = 400_000
+_LONG_LINE_BREAKS = (b" ", b"\t", b",", b";")
+
+
+@dataclass
+class _Totals:
+    candidates: int = 0
+    rejected: int = 0
+    new_iocs: int = 0
+    new_observations: int = 0
+
+
+def _newline_positions(text: str) -> list[int]:
+    out: list[int] = []
+    i = text.find(NEWLINE)
+    while i != -1:
+        out.append(i)
+        i = text.find(NEWLINE, i + 1)
+    return out
+
+
+def _store_chunk(
+    conn: sqlite3.Connection,
+    text: str,
+    source_id: int,
+    observed_at: str,
+    char_offset: int,
+    line_base: int,
+    totals: _Totals,
+    ioc_cache: dict[tuple[str, str], int],
+) -> None:
+    """Extract and store one chunk. `char_offset` / `line_base` make spans and line numbers absolute."""
+    newlines = _newline_positions(text)
+    candidates = extract(text)
+    totals.candidates += len(candidates)
+    obs_ids: dict[int, int] = {}  # id(candidate) -> observation row id (parents are listed before their hosts)
+    ioc_ids: dict[int, int] = {}  # id(candidate) -> ioc row id
+
+    for cand in candidates:
+        norm = normalize(cand)
+        if norm is None:
+            totals.rejected += 1
+            continue
+        key = (norm.type.value, norm.value)
+        ioc_id = ioc_cache.get(key)
+        if ioc_id is None:
+            ioc_id, created = upsert_ioc(conn, norm.type.value, norm.value, norm.attrs, observed_at)
+            totals.new_iocs += created
+            if len(ioc_cache) >= IOC_CACHE_LIMIT:
+                ioc_cache.clear()
+            ioc_cache[key] = ioc_id
+        ioc_ids[id(cand)] = ioc_id
+        parent = obs_ids.get(id(cand.derived_from)) if cand.derived_from else None
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO observations "
+            "(ioc_id, source_id, raw, span_start, span_end, line_no, defanged, parent_observation_id, context) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (ioc_id, source_id, cand.raw, char_offset + cand.start, char_offset + cand.end,
+             line_base + bisect_right(newlines, cand.start - 1) + 1, int(cand.defanged), parent,
+             _context(text, cand.start, cand.end)),
+        )
+        if cur.rowcount:
+            totals.new_observations += 1
+            obs_ids[id(cand)] = cur.lastrowid
+        if cand.derived_from is not None and id(cand.derived_from) in ioc_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO relations (parent_id, child_id, kind, source_id) VALUES (?, ?, 'url_host', ?)",
+                (ioc_ids[id(cand.derived_from)], ioc_id, source_id),
+            )
+
+
+def _existing_source(conn: sqlite3.Connection, name: str, digest: str) -> int | None:
+    row = conn.execute("SELECT id FROM sources WHERE name = ? AND content_sha256 = ?", (name, digest)).fetchone()
+    return row["id"] if row else None
+
+
 def ingest_text(
     conn: sqlite3.Connection,
     text: str,
@@ -172,51 +257,101 @@ def ingest_text(
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     with conn:  # one transaction: either the whole source lands or none of it
-        existing = conn.execute(
-            "SELECT id FROM sources WHERE name = ? AND content_sha256 = ?", (source_name, digest)
-        ).fetchone()
+        existing = _existing_source(conn, source_name, digest)
         if existing:
-            return IngestResult(source_id=existing["id"], already_ingested=True)
-
+            return IngestResult(source_id=existing, already_ingested=True)
         source_id = conn.execute(
             "INSERT INTO sources (name, kind, content_sha256, ingested_at) VALUES (?, ?, ?, ?)",
             (source_name, source_kind, digest, observed_at),
         ).lastrowid
+        totals = _Totals()
+        _store_chunk(conn, text, source_id, observed_at, 0, 0, totals, {})
+    return IngestResult(source_id, False, totals.candidates, totals.rejected, totals.new_iocs, totals.new_observations)
 
-        newlines = [i for i, ch in enumerate(text) if ch == "\n"]
-        candidates = extract(text)
-        obs_ids: dict[int, int] = {}  # id(candidate) -> observation row id
-        ioc_ids: dict[int, int] = {}  # id(candidate) -> ioc row id
-        rejected = new_iocs = new_obs = 0
 
-        # extract() lists a URL before its derived host, so parents are stored first.
-        for cand in candidates:
-            norm = normalize(cand)
-            if norm is None:
-                rejected += 1
-                continue
-            ioc_id, created = upsert_ioc(conn, norm.type.value, norm.value, norm.attrs, observed_at)
-            new_iocs += created
-            ioc_ids[id(cand)] = ioc_id
-            parent = obs_ids.get(id(cand.derived_from)) if cand.derived_from else None
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO observations "
-                "(ioc_id, source_id, raw, span_start, span_end, line_no, defanged, parent_observation_id, context) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (ioc_id, source_id, cand.raw, cand.start, cand.end,
-                 bisect_right(newlines, cand.start - 1) + 1, int(cand.defanged), parent,
-                 _context(text, cand.start, cand.end)),
-            )
-            if cur.rowcount:
-                new_obs += 1
-                obs_ids[id(cand)] = cur.lastrowid
-            if cand.derived_from is not None and id(cand.derived_from) in ioc_ids:
-                conn.execute(
-                    "INSERT OR IGNORE INTO relations (parent_id, child_id, kind, source_id) VALUES (?, ?, 'url_host', ?)",
-                    (ioc_ids[id(cand.derived_from)], ioc_id, source_id),
-                )
+def _sha256_file(path: Path, block: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            data = f.read(block)
+            if not data:
+                return h.hexdigest()
+            h.update(data)
 
-    return IngestResult(source_id, False, len(candidates), rejected, new_iocs, new_obs)
+
+def _read_chunks(path: Path, chunk_bytes: int, max_line_bytes: int) -> Iterator[tuple[str, int]]:
+    """Yield (text, bytes consumed). Chunks end on a newline, so no indicator is ever cut in half.
+
+    Only a line longer than `max_line_bytes` is split (at whitespace, comma or semicolon when
+    possible). An incremental decoder makes multi-byte characters safe at any cut, and gives the
+    same text as decoding the whole file at once.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending = b""
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(chunk_bytes)
+            if not block:
+                tail = decoder.decode(pending, final=True)
+                if tail:
+                    yield tail, len(pending)
+                return
+            pending += block
+            cut = pending.rfind(b"\n") + 1  # bytes to emit: everything up to and including the last newline
+            if cut == 0:
+                if len(pending) < max_line_bytes:
+                    continue  # still inside one long line; keep reading
+                cut = max(pending.rfind(b) for b in _LONG_LINE_BREAKS) + 1 or len(pending)
+            text = decoder.decode(pending[:cut])
+            consumed = cut
+            pending = pending[cut:]
+            if text:
+                yield text, consumed
+            elif consumed:
+                yield "", consumed
+
+
+def ingest_path(
+    conn: sqlite3.Connection,
+    path: str | Path,
+    source_name: str | None = None,
+    source_kind: str = "file",
+    observed_at: str | None = None,
+    chunk_bytes: int = CHUNK_BYTES,
+    max_line_bytes: int = MAX_LINE_BYTES,
+    progress: Callable[[int, int], None] | None = None,
+) -> IngestResult:
+    """Ingest a text file of any size with bounded memory.
+
+    The file is hashed first (its SHA-256 is the file's own, so `Get-FileHash` agrees), then read in
+    chunks inside a single transaction: either the whole file lands or none of it. `progress` is
+    called with (bytes done, total bytes) after each chunk.
+    """
+    p = Path(path)
+    name = source_name or p.name
+    observed_at = observed_at or _now()
+    total = p.stat().st_size
+    digest = _sha256_file(p)
+
+    with conn:
+        existing = _existing_source(conn, name, digest)
+        if existing:
+            return IngestResult(source_id=existing, already_ingested=True)
+        source_id = conn.execute(
+            "INSERT INTO sources (name, kind, content_sha256, ingested_at) VALUES (?, ?, ?, ?)",
+            (name, source_kind, digest, observed_at),
+        ).lastrowid
+        totals, cache = _Totals(), {}
+        char_offset = line_base = done = 0
+        for text, consumed in _read_chunks(p, chunk_bytes, max_line_bytes):
+            if text:
+                _store_chunk(conn, text, source_id, observed_at, char_offset, line_base, totals, cache)
+                char_offset += len(text)
+                line_base += text.count(NEWLINE)
+            done += consumed
+            if progress:
+                progress(done, total)
+    return IngestResult(source_id, False, totals.candidates, totals.rejected, totals.new_iocs, totals.new_observations)
 
 
 def upsert_ioc(conn: sqlite3.Connection, kind: str, value: str, attrs: dict[str, str], seen: str) -> tuple[int, int]:
@@ -232,9 +367,7 @@ def upsert_ioc(conn: sqlite3.Connection, kind: str, value: str, attrs: dict[str,
 
 
 def ingest_file(conn: sqlite3.Connection, path: str | Path, source_kind: str = "file") -> IngestResult:
-    p = Path(path)
-    text = p.read_text(encoding="utf-8", errors="replace")
-    return ingest_text(conn, text, source_name=p.name, source_kind=source_kind)
+    return ingest_path(conn, path, source_kind=source_kind)
 
 
 def list_iocs(conn: sqlite3.Connection, ioc_type: str | None = None, min_sources: int = 1) -> list[sqlite3.Row]:

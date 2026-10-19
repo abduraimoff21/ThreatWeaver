@@ -10,3 +10,5 @@ build/
 .threatweaver-cache/
 out/
 data/public/
+*.db-wal
+*.db-shm

@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -38,22 +38,25 @@ MAX_FEED_MATCHES = 20
 MAX_QUIET_ROWS = 100
 
 
-def _ev(evidence: tuple[Evidence, ...]) -> tuple[list[dict[str, Any]], int]:
-    """Distinct evidence refs in a stable order: (the first MAX_EVIDENCE of them, the true total)."""
+def _ev(evidence: tuple[Evidence, ...], total: int | None = None) -> tuple[list[dict[str, Any]], int]:
+    """Distinct evidence refs in a stable order: (the first MAX_EVIDENCE of them, the true total).
+
+    `total` is the producer's own count when it only handed over a sample of its evidence.
+    """
     seen: dict[tuple[str, int], dict[str, Any]] = {}
     for e in evidence:
         seen[(e.kind, e.id)] = e.to_dict()
     ordered = [seen[k] for k in sorted(seen)]
-    return ordered[:MAX_EVIDENCE], len(ordered)
+    return ordered[:MAX_EVIDENCE], max(len(ordered), total or 0)
 
 
 def _rule_dict(hit) -> dict[str, Any]:
-    shown, total = _ev(hit.evidence)
+    shown, total = _ev(hit.evidence, hit.evidence_total)
     return {"rule": hit.rule, "points": hit.points, "reason": hit.reason, "evidence": shown, "evidence_total": total}
 
 
 def _link_dict(l, ioc_ref) -> dict[str, Any]:
-    shown, total = _ev(l.evidence)
+    shown, total = _ev(l.evidence, l.evidence_total)
     return {"rule": l.rule, "a": ioc_ref(l.a), "b": ioc_ref(l.b), "explanation": l.explanation,
             "evidence": shown, "evidence_total": total}
 
@@ -72,8 +75,18 @@ def build_report(
     def ioc_ref(i: int) -> dict[str, Any]:
         return {"id": i, "type": iocs[i]["type"], "value": iocs[i]["value"]}
 
+    # Sightings are summarised by SQL: totals, source names, and only the first MAX_SIGHTINGS rows per
+    # indicator are materialised. Memory grows with the number of indicators, not with the log size.
+    sight_total: dict[int, int] = {r["ioc_id"]: r["n"] for r in conn.execute(
+        "SELECT ioc_id, COUNT(*) AS n FROM observations GROUP BY ioc_id")}
+    sight_sources: dict[int, list[str]] = {}
+    for r in conn.execute("SELECT DISTINCT ioc_id, source_id FROM observations"):
+        sight_sources.setdefault(r["ioc_id"], []).append(sources[r["source_id"]]["name"])
     sightings: dict[int, list[dict[str, Any]]] = {}
-    for o in conn.execute("SELECT * FROM observations ORDER BY id"):
+    for o in conn.execute(
+        "SELECT * FROM (SELECT o.*, ROW_NUMBER() OVER (PARTITION BY ioc_id ORDER BY id) AS rn FROM observations o) "
+        "WHERE rn <= ? ORDER BY ioc_id, id", (MAX_SIGHTINGS,)
+    ):
         sightings.setdefault(o["ioc_id"], []).append({
             "observation_id": o["id"], "source": sources[o["source_id"]]["name"], "line": o["line_no"],
             "raw": o["raw"], "defanged": bool(o["defanged"]), "derived_from_url": o["parent_observation_id"] is not None,
@@ -94,6 +107,14 @@ def build_report(
             rec["listed_url"] = iocs[m.related_ioc_id]["value"]
         matches_for.setdefault(m.ioc_id, []).append(rec)
 
+    # Links are attached to cases through an index by indicator: scanning every link for every case
+    # is quadratic (800,000 single-indicator cases x hundreds of thousands of links never finishes).
+    link_position = {id(l): n for n, l in enumerate(result.links)}
+    links_by_ioc: dict[int, list] = defaultdict(list)
+    for l in result.links:
+        links_by_ioc[l.a].append(l)
+        links_by_ioc[l.b].append(l)
+
     local = sorted(verdicts)
     cases = []
     for members in clusters(local, result.links):
@@ -113,13 +134,14 @@ def build_report(
                 "level": verdicts[i].level,
                 "suggested_action": verdicts[i].suggested_action,
                 "rules": [_rule_dict(h) for h in verdicts[i].hits],
-                "sources": sorted({s["source"] for s in sightings.get(i, [])}),
-                "sightings_total": len(sightings.get(i, [])),
-                "sightings": sightings.get(i, [])[:MAX_SIGHTINGS],
+                "sources": sorted(set(sight_sources.get(i, []))),
+                "sightings_total": sight_total.get(i, 0),
+                "sightings": sightings.get(i, []),
                 "feed_matches_total": len(matches_for.get(i, [])),
                 "feed_matches": matches_for.get(i, [])[:MAX_FEED_MATCHES],
             } for i in ordered],
-            "links": [_link_dict(l, ioc_ref) for l in result.links if l.a in member_set or l.b in member_set],
+            "links": [_link_dict(l, ioc_ref) for l in sorted(
+                {id(l): l for i in members for l in links_by_ioc.get(i, ())}.values(), key=lambda l: link_position[id(l)])],
         })
     cases.sort(key=lambda c: (-c["max_score"], c["case_id"]))
 

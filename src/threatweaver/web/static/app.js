@@ -12,7 +12,7 @@ const RULE_HELP = {
   hostname_ip: 'Host name spells out this IP address',
   shared_family: 'Listed by a feed under the same malware family',
 };
-const state = { exact: false, theme: null };
+const state = { exact: false, theme: null, uploadLimit: 1024 * 1024 * 1024 };
 
 /* ---------- tiny DOM helpers ---------- */
 function append(el, kids) {
@@ -73,7 +73,12 @@ async function guarded(fn) { try { return await fn(); } catch (e) { toast(e.mess
 const val = (i) => (state.exact ? i.value : i.display);
 const badge = (level) => h('span', { class: 'badge ' + level }, level);
 const typeTag = (t) => h('span', { class: 'tag' }, t);
-const fmtBytes = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
+const fmtBytes = (n) => (n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GB' : n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
+function fmtDuration(seconds) {
+  if (seconds === null || seconds === undefined) return '';
+  if (seconds < 90) return `${Math.max(1, Math.round(seconds))} s`;
+  return seconds < 5400 ? `${Math.round(seconds / 60)} min` : `${(seconds / 3600).toFixed(1)} h`;
+}
 function age(iso) {
   if (!iso) return '';
   const hrs = (Date.now() - Date.parse(iso)) / 36e5;
@@ -259,10 +264,14 @@ function drawGraph(data) {
 /* ---------- views ---------- */
 async function viewOverview() {
   const o = await api('/api/overview');
+  state.uploadLimit = o.limits.upload_bytes;
   const sm = o.summary;
   const max = Math.max(1, ...LEVELS.map((l) => sm.by_level[l]));
   const root = h('div', {});
-  if (o.empty) {
+  const working = [...activity.values()].some((a) => ['uploading', 'queued', 'processing'].includes(a.phase));
+  if (o.empty && working) {
+    root.append(h('div', { class: 'banner' }, h('b', {}, 'Your file is being processed. '), 'Results appear here when it finishes: a file is added all at once, so nothing shows until it is complete. You can keep using the dashboard.'));
+  } else if (o.empty) {
     root.append(h('div', { class: 'banner' }, h('b', {}, 'No data yet. '), 'Add a log file or report below. ThreatWeaver extracts indicators, de-duplicates them, and shows what is connected.'));
   }
   root.append(h('div', { class: 'tiles' },
@@ -282,30 +291,116 @@ async function viewOverview() {
 }
 
 function addDataPanel() {
-  const input = h('input', { type: 'file', multiple: true, class: 'hidden', id: 'filepick', onchange: (e) => upload([...e.target.files]) });
+  const input = h('input', { type: 'file', multiple: true, class: 'hidden', id: 'filepick', onchange: (e) => { uploadFiles([...e.target.files]); e.target.value = ''; } });
   const zone = h('div', { class: 'drop', tabindex: 0, role: 'button', 'aria-label': 'Choose log files to add',
     onclick: () => input.click(), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') input.click(); },
     ondragover: (e) => { e.preventDefault(); zone.classList.add('over'); }, ondragleave: () => zone.classList.remove('over'),
-    ondrop: (e) => { e.preventDefault(); zone.classList.remove('over'); upload([...e.dataTransfer.files]); } },
-    h('b', {}, 'Drop log files here'), h('div', {}, 'or click to choose (text, logs, CSV, JSON; up to 20 MB each)'));
+    ondrop: (e) => { e.preventDefault(); zone.classList.remove('over'); uploadFiles([...e.dataTransfer.files]); } },
+    h('b', {}, 'Drop log files here'), h('div', {}, `or click to choose (text logs, CSV, JSON; up to ${fmtBytes(state.uploadLimit)} each)`));
   const name = h('input', { type: 'text', placeholder: 'name, e.g. analyst-notes.txt', value: 'pasted-text.txt', 'aria-label': 'Name for pasted text' });
-  const text = h('textarea', { placeholder: 'Or paste a report, email or log excerpt here', style: 'min-height:6rem', 'aria-label': 'Pasted text' });
-  return h('div', { class: 'panel' }, h('h2', {}, 'Add data'), input, zone,
-    h('details', { style: 'margin-top:.75rem' }, h('summary', {}, 'Paste text instead'), h('div', { class: 'field' }, name), text,
-      h('button', { class: 'primary', onclick: async () => { if (text.value.trim()) { await upload([{ name: name.value || 'pasted-text.txt', size: text.value.length, text: async () => text.value }]); text.value = ''; } } }, 'Add pasted text')),
-    h('p', { class: 'small muted' }, 'Files are read in your browser and sent only to this local dashboard. Nothing leaves your machine.'));
-}
-async function upload(files) {
-  let any = false;
-  for (const f of files) {
-    if (f.size > 20 * 1024 * 1024) { toast(`${f.name} is ${fmtBytes(f.size)}; the limit is 20 MB`, 'err'); continue; }
-    const body = { name: f.name, text: await f.text() };
-    const r = await guarded(() => api('/api/ingest', body));
-    if (!r) continue;
-    any = true;
+  const text = h('textarea', { placeholder: 'Or paste a report, email or log excerpt here', class: 'short', 'aria-label': 'Pasted text' });
+  const addPasted = async () => {
+    if (!text.value.trim()) return;
+    const r = await guarded(() => api('/api/ingest', { name: name.value || 'pasted-text.txt', text: text.value }));
+    if (!r) return;
+    text.value = '';
     toast(r.already_ingested ? `${r.name}: identical content was already added` : `${r.name}: ${r.new_indicators} new indicators, ${r.sightings} sightings`, 'ok');
+    route();
+  };
+  return h('div', { class: 'panel' }, h('h2', {}, 'Add data'), input, zone,
+    h('p', { class: 'small muted' }, 'Large files are uploaded straight to disk and processed in the background, so you can keep using the dashboard. A 1 GB log can take 10 to 20 minutes.'),
+    h('details', {}, h('summary', {}, 'Paste text instead'), h('div', { class: 'field' }, name), text, h('button', { class: 'primary', onclick: addPasted }, 'Add pasted text')),
+    h('p', { class: 'small muted' }, 'Files go only to this local dashboard. Nothing leaves your machine.'));
+}
+
+/* ---------- uploads and background jobs ----------
+ * A file is sent as the raw request body (the browser streams it from disk; it is never read into
+ * the page). The server writes it to a temporary file and processes it in the background; we then
+ * poll /api/jobs for progress. */
+const activity = new Map(); // key -> { name, phase: uploading|queued|processing|done|error, percent, note, eta, size }
+const notified = new Set(); // finished job ids already announced
+let pollTimer = null;
+let uploadSeq = 0;
+
+function sendFile(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload?name=' + encodeURIComponent(file.name));
+    xhr.setRequestHeader('X-TW-Token', TOKEN);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded, e.total); };
+    xhr.onerror = () => reject(new Error('the upload failed (is the dashboard still running?)'));
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300 && data) resolve(data);
+      else reject(new Error((data && data.error) || `HTTP ${xhr.status}`));
+    };
+    xhr.send(file);
+  });
+}
+
+async function uploadFiles(files) {
+  for (const f of files) {
+    if (f.size === 0) { toast(`${f.name} is empty`, 'err'); continue; }
+    if (f.size > state.uploadLimit) { toast(`${f.name} is ${fmtBytes(f.size)}; the limit is ${fmtBytes(state.uploadLimit)}`, 'err'); continue; }
+    const key = 'upload:' + (++uploadSeq);
+    const entry = { name: f.name, phase: 'uploading', percent: 0, size: f.size };
+    activity.set(key, entry);
+    renderActivity();
+    try {
+      await sendFile(f, (done, total) => { entry.percent = (100 * done) / total; renderActivity(); });
+      activity.delete(key); // the server-side job takes over from here
+    } catch (e) {
+      entry.phase = 'error'; entry.note = e.message; renderActivity();
+      toast(`${f.name}: ${e.message}`, 'err');
+    }
+    await pollJobs();
   }
-  if (any) route();
+}
+
+async function pollJobs() {
+  let data;
+  try { data = await api('/api/jobs'); } catch { return; }
+  const firstLoad = !pollJobs.seen;
+  pollJobs.seen = true;
+  let finishedNow = false;
+  for (const job of data.jobs) {
+    const key = 'job:' + job.id;
+    if (job.state === 'done' || job.state === 'error') {
+      if (!notified.has(job.id)) {
+        notified.add(job.id);
+        if (!firstLoad) {
+          finishedNow = true;
+          if (job.state === 'done') toast(job.result.already_ingested ? `${job.name}: identical content was already added` : `${job.name}: ${job.result.new_indicators} new indicators, ${job.result.sightings} sightings`, 'ok');
+          else toast(`${job.name} failed: ${job.error}`, 'err');
+        } else continue; // old finished jobs from before this page load are not shown
+      }
+    }
+    const note = job.state === 'done' ? (job.result.already_ingested ? 'already added' : `${job.result.new_indicators} new indicators`) : job.error;
+    activity.set(key, { name: job.name, phase: job.state, percent: job.percent, eta: job.eta_seconds, size: job.size, note });
+  }
+  renderActivity();
+  clearTimeout(pollTimer);
+  const busy = data.active > 0 || [...activity.values()].some((a) => a.phase === 'uploading');
+  if (busy) pollTimer = setTimeout(pollJobs, 1000);
+  if (finishedNow && /^#\/?(overview|cases|indicators|graph|sources|report)?$/.test(location.hash)) route();
+}
+
+function renderActivity() {
+  const box = $('#activity');
+  if (!box) return;
+  box.replaceChildren(...[...activity.entries()].map(([key, a]) => {
+    const label = { uploading: 'Uploading', queued: 'Waiting', processing: 'Processing', done: 'Finished', error: 'Failed' }[a.phase];
+    const detail = a.phase === 'processing' ? `${a.percent.toFixed(0)}%${a.eta ? ', about ' + fmtDuration(a.eta) + ' left' : ''}`
+      : a.phase === 'uploading' ? `${a.percent.toFixed(0)}% of ${fmtBytes(a.size)}` : (a.note || '');
+    return h('div', { class: 'job ' + a.phase, role: 'status' },
+      h('div', { class: 'toolbar', style: 'justify-content:space-between' },
+        h('span', {}, h('b', {}, label + ' '), a.name, ' ', h('span', { class: 'muted small' }, detail)),
+        (a.phase === 'done' || a.phase === 'error') ? h('button', { 'aria-label': 'Dismiss', onclick: () => { activity.delete(key); renderActivity(); } }, 'Dismiss') : null),
+      (a.phase === 'uploading' || a.phase === 'processing' || a.phase === 'queued')
+        ? h('div', { class: 'progress', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': Math.round(a.percent) }, h('div', { style: `width:${Math.min(100, a.percent)}%` })) : null);
+  }));
 }
 
 function feedsPanel(feeds) {
@@ -327,20 +422,29 @@ function feedsPanel(feeds) {
 }
 
 async function viewCases() {
-  const { cases: all } = await api('/api/cases');
-  if (!all.length) return empty('No cases yet. Add data on the Overview page.');
-  const quiet = (c) => c.links === 0 && c.max_level === 'info';
+  const first = await api('/api/cases');
+  if (!first.all_cases) return empty('No cases yet. Add data on the Overview page.');
   const list = h('div', { class: 'cards' });
   const count = h('span', { class: 'small muted' });
-  const toggle = h('input', { type: 'checkbox', onchange: draw });
-  function draw() {
-    const cases = toggle.checked ? all : all.filter((c) => !quiet(c));
-    count.textContent = `${cases.length} of ${all.length} cases`;
-    list.replaceChildren(...cases.map(caseCard));
+  const nav = h('div', { class: 'toolbar', style: 'margin-top:.75rem' });
+  const state2 = { quiet: false, offset: 0, data: first };
+  const toggle = h('input', { type: 'checkbox', onchange: () => { state2.quiet = toggle.checked; state2.offset = 0; load(); } });
+  async function load() {
+    const d = await guarded(() => api(`/api/cases?quiet=${state2.quiet ? 1 : 0}&offset=${state2.offset}&limit=${first.limit}`));
+    if (!d) return;
+    state2.data = d;
+    const to = Math.min(d.total, d.offset + d.cases.length);
+    count.textContent = d.total ? `showing ${d.offset + 1}-${to} of ${d.total.toLocaleString()} cases` : 'no cases to show';
+    list.replaceChildren(...d.cases.map(caseCard));
+    nav.replaceChildren(
+      h('button', { disabled: d.offset === 0, onclick: () => { state2.offset = Math.max(0, d.offset - d.limit); load(); } }, 'Previous'),
+      h('button', { disabled: d.offset + d.limit >= d.total, onclick: () => { state2.offset = d.offset + d.limit; load(); } }, 'Next'));
   }
-  const wrap = h('div', {}, h('p', { class: 'muted' }, 'A case is a group of indicators connected by strong links (a URL and its host, the same log line, or a host name that spells out an IP). Highest suggested priority first.'),
-    h('div', { class: 'toolbar', style: 'margin-bottom:.75rem' }, h('label', { style: 'display:flex;gap:.35rem;align-items:center;margin:0' }, toggle, 'Also show quiet cases (a single indicator, nothing linked, nothing suspicious)'), count), list);
-  draw();
+  const label = `Also show quiet cases (${first.quiet_cases.toLocaleString()}: a single indicator, nothing linked, nothing suspicious)`;
+  const wrap = h('div', {}, h('p', { class: 'muted' }, 'A case is a group of indicators connected by strong links (a URL and its host, the same log line, or a host name that spells out an IP). Highest suggested priority first. To search everything, use the Indicators page.'),
+    h('div', { class: 'toolbar', style: 'margin-bottom:.75rem' }, h('label', { style: 'display:flex;gap:.35rem;align-items:center;margin:0' }, toggle, label), count), list, nav);
+  state2.offset = 0;
+  await load();
   return wrap;
 }
 function caseCard(c) {
@@ -491,6 +595,7 @@ function shell() {
         h('span', { class: 'safe' }, 'Local only. Suggestions, not actions.'),
         h('label', { style: 'display:flex;gap:.35rem;align-items:center;margin:0' }, h('input', { type: 'checkbox', checked: state.exact, onchange: (e) => { state.exact = e.target.checked; route(); } }), 'Show exact values'),
         h('button', { onclick: () => route(), 'aria-label': 'Refresh' }, 'Refresh'))),
+      h('div', { id: 'activity', class: 'activity', 'aria-live': 'polite' }),
       h('div', { id: 'view' }))),
     h('div', { class: 'toasts', 'aria-live': 'polite' }));
 }
@@ -503,7 +608,7 @@ async function route() {
   document.querySelectorAll('.nav a').forEach((a) => (a.dataset.k === top ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current')));
   $('#title').textContent = TITLES[key] || 'Overview';
   const view = $('#view'), seq = ++routeSeq;
-  view.replaceChildren(h('p', { class: 'muted' }, 'Loading...'));
+  view.replaceChildren(h('p', { class: 'muted' }, 'Loading... After adding a large file, the first view can take up to a minute while everything is analysed.'));
   try {
     const views = { overview: viewOverview, cases: viewCases, case: () => viewCase(arg), indicators: viewIndicators, graph: viewGraph, sources: viewSources, report: viewReport, advisories: viewAdvisories, advisory: () => viewAdvisory(arg) };
     const node = await (views[key] || viewOverview)();
@@ -515,4 +620,5 @@ async function route() {
 window.addEventListener('hashchange', route);
 shell();
 route();
+pollJobs(); // pick up anything still running from before a page reload
 })();

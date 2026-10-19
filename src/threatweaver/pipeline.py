@@ -38,13 +38,14 @@ def load_scenario(conn: sqlite3.Connection, scenario_dir: str | Path, timestamp:
             load_feed(conn, spec, path.read_text(encoding="utf-8"), collected_at=timestamp)
 
 
-def run(conn: sqlite3.Connection, generated_at: str | None = FIXED_TIME) -> PipelineRun:
+def run(conn: sqlite3.Connection, generated_at: str | None = FIXED_TIME, persist: bool = True) -> PipelineRun:
     import time
 
     timings: dict[str, float] = {}
     t = time.perf_counter()
     result = correlate(conn)
-    save_links(conn, result.links)
+    if persist:  # the links table is only a cache; read-only callers (the dashboard) skip it
+        save_links(conn, result.links)
     timings["correlate"] = time.perf_counter() - t
     t = time.perf_counter()
     verdicts = triage(conn, result)

@@ -145,12 +145,16 @@ Notes:
 - **Feeds:** the Download / Update buttons ask for confirmation first, because they are the only thing that contacts the internet.
 - **Port:** the default is 8765. If it is busy, the next free port is used (check the printed link). `--port` chooses one, `--no-browser` only prints the link, `--out` sets where approved advisories are written (default `out/advisories`).
 - **Log lines:** the dashboard shows the log line around each sighting. Databases made by an older version are upgraded automatically, but their old sightings have no stored line until you re-ingest the file.
+- **Big files (up to 1 GB each):** the browser streams the file to a temporary file on disk (it is never loaded into the page), then it is processed in the background with a progress bar and an estimate. You can keep browsing the data you already have. A file is added all at once, so its results appear only when it has finished. While one is processing, actions that write (feed downloads, advisory steps, pasted text) wait with a clear message. You need roughly three times the file size in free disk space (the temporary copy plus the growing database). Measured on one real SSH log repeated to 0.96 GiB: 4 s to upload, about 16 minutes to process, the server stayed under 80 MB of memory. Closing the dashboard while a file is processing discards that file's work (nothing partial is kept): upload it again.
+- **Pasted text** is limited to 20 MB; use a file for anything bigger.
+- **Very large result sets:** the Cases page shows 200 cases at a time and hides quiet single-indicator cases until you ask; use Indicators to search everything.
 
 How the dashboard protects you (it handles text that attackers may have influenced, and your browser may have other pages open):
 
 - It listens on `127.0.0.1` only and refuses to start on any other address.
 - Every request needs the random per-run token. Requests with a foreign `Host` or `Origin` are refused, so another web page (including DNS-rebinding tricks) cannot drive it. No CORS headers are ever sent.
 - A strict Content-Security-Policy allows scripts and styles only from the dashboard itself: no inline code, no framing, no outside connections.
+- Uploads need the token and a matching Host and Origin like every other request, must be sent as `application/octet-stream`, are size-capped, go to a private temporary folder that is deleted afterwards, and are refused before anything is written if the disk is too full.
 - Log and feed text is always inserted as plain text, never as HTML, and the page contains no code path that builds HTML from data. Tests enforce this.
 - Everything stays on your machine. Treat the terminal link like a password while the dashboard runs.
 
@@ -166,7 +170,7 @@ python -m threatweaver list --db case.db --type domain           # unique indica
 python -m threatweaver show domain evil.example.com --db case.db # every sighting, with line numbers
 ```
 
-Ingesting identical content twice is a no-op. Changed content under the same name is stored as a new source.
+Ingesting identical content twice is a no-op. Changed content under the same name is stored as a new source. Files are read in chunks, so the command line handles any size with a small, fixed amount of memory and prints progress every 5% for files over 32 MB. The SHA-256 shown for a source is the file's own (it matches `Get-FileHash`).
 
 ### 2. Add public threat intelligence
 
@@ -296,7 +300,7 @@ Levels: **high** at 50 or more, **medium** at 25, **low** at 10, otherwise **inf
 ## Testing and measured results
 
 ```bash
-python -m pytest                 # 248 tests (247 pass; 1 needs yara-python and is skipped without it)
+python -m pytest                 # 297 tests (296 pass; 1 needs yara-python and is skipped without it)
 python -m threatweaver evaluate  # extraction precision / recall
 python -m threatweaver evaluate --scenario
 ```
@@ -309,6 +313,7 @@ python -m threatweaver evaluate --scenario
 | Triage | 10 / 10 levels as labeled | Same caveat; thresholds are not calibrated |
 | Report traceability | 100% of claims resolve to stored rows; tampering is detected | Proves the report cites real rows, not that the rows are true |
 | Time vs manual | About 3 ms for 10 indicators | The manual side is an **assumed** 30 s per indicator per feed, not a measurement. Replace it with timed analyst runs before quoting a speed-up |
+| Large input | One real 73 MB SSH log repeated to 0.96 GiB (9.2 million lines, 7.76 million sightings, 1,603 distinct indicators): upload 4 s, ingest 16 min at about 70 MB of server memory, then analysis 43 s at 62 MB peak (an earlier version needed 132 s and 4.4 GB). 800,000 distinct indicators: ingest 51 s, analysis 54 s at about 2.5 GB | The 1 GB file is one log repeated, so it has few distinct indicators; memory in analysis grows with **distinct indicators** (about 3 KB each), not with log size. A log with millions of distinct IPs would need many GB |
 
 Real-data check: on 6,000 lines of public Loghub logs (OpenSSH, Apache, Linux; 129 IPs and 38 host names), extraction matched an independent count and surfaced two bugs that were then fixed. No malware indicators exist in those logs, so triage correctly rated everything "info". These logs are not redistributed with the project.
 
@@ -323,6 +328,8 @@ What the numbers cannot tell you is how it behaves on your logs. Run it on a cas
 - The domain-suffix list is a bundled subset of the official one. Suffixes that double as file extensions (`.py .sh .pl .md .rs .so .zip .mov .cc`) are accepted in plain text only when the name has four or more labels (`arx58.internetdsl.tpnet.pl`) or a registry-style second level (`wsi.edu.pl`), or when defanged, or as a URL host. Short names such as `awstats.pl` stay rejected, which also means a short real name like `onet.pl` is missed in plain text.
 - An IP address written inside a host name (`62.99.164.82.isp.example.net`, `host-156.202.121.254-static.example.net`) is extracted as the host name, not as a separate IP. The `hostname_ip` rule links the two when the IP also appears on its own.
 - Hashes beyond MD5 / SHA-1 / SHA-256 are not recognised.
+- Binary files (pcap, `.evtx`, archives, PDFs) are not understood and yield nothing; convert them to text first.
+- Ingest reads files in 4 MB chunks that end on a line boundary. A single "line" longer than 64 MB is split at whitespace, so an indicator could in principle be cut in half there.
 
 **Feeds**
 - Feodo Tracker was verified against the live feed. The URLhaus parser follows the documented layout and has been tested only on synthetic data.
@@ -341,6 +348,9 @@ What the numbers cannot tell you is how it behaves on your logs. Run it on a cas
 - Thresholds and points are judgement calls, not calibrated values.
 
 **Dashboard**
+- Memory in the analysis step grows with the number of **distinct** indicators (about 3 KB each: 800,000 distinct indicators used about 2.5 GB). Logs with many millions of distinct IPs or domains will not fit on a small machine.
+- One large file is processed at a time (others queue). There is no cancel button, and a processing file is lost if the dashboard is closed.
+- At very large sizes the first view after a file finishes can take up to a minute while the data is analysed (43 s at 7.76 million sightings; 54 s at 800,000 indicators).
 - Single-user and local: one shared token, no accounts. Reviewer and author names are typed by the person using it.
 - The graph layout is computed once per view (drag nodes to adjust; it does not animate live), and the all-cases view shows at most the 300 highest-scoring linked indicators.
 - Pages refresh when you press Refresh or take an action, not continuously.

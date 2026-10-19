@@ -22,6 +22,7 @@ import hmac
 import json
 import re
 import secrets
+import shutil
 import sys
 import threading
 import webbrowser
@@ -37,7 +38,10 @@ from .api import ApiError, Context
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_FILES = {"app.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
-MAX_BODY = api.MAX_UPLOAD_BYTES + 1024 * 1024
+JSON_BODY_SLACK = 1024 * 1024  # JSON bodies may be this much larger than the paste limit
+CHUNK = 1024 * 1024
+DRAIN_AUTH_FAILURE = 1024 * 1024  # after a 403 we only swallow a little of what an unauthenticated client sends
+DRAIN_IDLE_SECONDS = 5
 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
@@ -65,6 +69,7 @@ def make_handler(ctx: Context, token: str, port: int) -> type[BaseHTTPRequestHan
         server_version = "ThreatWeaver"
         sys_version = ""
         protocol_version = "HTTP/1.1"
+        timeout = 120  # a stalled client cannot hold a thread (or a half-written upload) forever
 
         # -- plumbing ----------------------------------------------------
         def log_message(self, fmt: str, *args: Any) -> None:  # never log the query string (it holds the token)
@@ -86,8 +91,34 @@ def make_handler(ctx: Context, token: str, port: int) -> type[BaseHTTPRequestHan
         def _json(self, status: int, payload: Any) -> None:
             self._send(status, json.dumps(payload).encode("utf-8"), "application/json; charset=utf-8")
 
+        _unread = 0  # bytes of the current request body not yet read
+
         def _error(self, status: int, message: str) -> None:
+            self.close_connection = True  # an unread request body must not be mistaken for the next request
             self._json(status, {"error": message})
+            self._drain(DRAIN_AUTH_FAILURE if status in (HTTPStatus.FORBIDDEN, HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+                        else api.MAX_UPLOAD_BYTES + JSON_BODY_SLACK)
+
+        def _drain(self, limit: int) -> None:
+            """Read and discard what the client is still sending after we replied early.
+
+            Closing with unread data makes the operating system reset the connection, and the
+            browser may then show a network error instead of our message. This is skipped when
+            the body was already read.
+            """
+            remaining = min(self._unread, limit)
+            self._unread = 0
+            if remaining <= 0:
+                return
+            try:
+                self.connection.settimeout(DRAIN_IDLE_SECONDS)
+                while remaining > 0:
+                    block = self.rfile.read(min(CHUNK, remaining))
+                    if not block:
+                        break
+                    remaining -= len(block)
+            except OSError:
+                pass
 
         def _host_ok(self) -> bool:
             return self.headers.get("Host", "") in allowed_hosts
@@ -145,7 +176,7 @@ def make_handler(ctx: Context, token: str, port: int) -> type[BaseHTTPRequestHan
             if path == "/api/overview":
                 return api.overview(ctx)
             if path == "/api/cases":
-                return api.cases(ctx)
+                return api.cases(ctx, query)
             if path == "/api/indicators":
                 return api.indicators(ctx, query)
             if path == "/api/graph":
@@ -156,6 +187,8 @@ def make_handler(ctx: Context, token: str, port: int) -> type[BaseHTTPRequestHan
                 return api.report(ctx)
             if path == "/api/advisories":
                 return api.advisories(ctx)
+            if path == "/api/jobs":
+                return api.jobs_status(ctx)
             m = _ID.match(path)
             if m:
                 kind, ident = m.groups()
@@ -168,21 +201,29 @@ def make_handler(ctx: Context, token: str, port: int) -> type[BaseHTTPRequestHan
 
         # -- POST --------------------------------------------------------
         def do_POST(self) -> None:
+            try:
+                self._unread = max(0, int(self.headers.get("Content-Length", "0")))
+            except ValueError:
+                self._unread = 0
             path = urlsplit(self.path).path
             if not path.startswith("/api/"):
                 return self._error(HTTPStatus.NOT_FOUND, "not found")
             if not self._api_ok():
                 return
+            if path == "/api/upload":
+                return self._upload(urlsplit(self.path))
             if not self.headers.get("Content-Type", "").lower().startswith("application/json"):
                 return self._error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "JSON only")
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 return self._error(HTTPStatus.BAD_REQUEST, "bad length")
-            if length < 0 or length > MAX_BODY:
+            if length < 0 or length > api.MAX_PASTE_BYTES + JSON_BODY_SLACK:
                 return self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request too large")
             try:
-                body = json.loads(self.rfile.read(length) or b"{}")
+                raw = self.rfile.read(length)
+                self._unread = 0
+                body = json.loads(raw or b"{}")
                 if not isinstance(body, dict):
                     raise ValueError("body must be an object")
             except ValueError:
@@ -201,6 +242,59 @@ def make_handler(ctx: Context, token: str, port: int) -> type[BaseHTTPRequestHan
             except Exception as exc:
                 sys.stderr.write(f"[ui] internal error on {path}: {type(exc).__name__}: {exc}\n")
                 self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal error; see the terminal")
+
+        def _upload(self, parts: Any) -> None:
+            """Stream the request body to a temporary file, then hand it to the background worker."""
+            if not self.headers.get("Content-Type", "").lower().startswith("application/octet-stream"):
+                return self._error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "send the file as application/octet-stream")
+            raw_length = self.headers.get("Content-Length")
+            if raw_length is None or "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+                return self._error(HTTPStatus.LENGTH_REQUIRED, "Content-Length is required")
+            try:
+                length = int(raw_length)
+            except ValueError:
+                return self._error(HTTPStatus.BAD_REQUEST, "bad length")
+            name = api.clean_name(parse_qs(parts.query).get("name", [""])[0])
+            if not name:
+                return self._error(HTTPStatus.BAD_REQUEST, "a file name is required")
+            if length <= 0:
+                return self._error(HTTPStatus.BAD_REQUEST, "the file is empty")
+            if length > api.MAX_UPLOAD_BYTES:
+                return self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                                   f"file is larger than {api.MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+            jobs = ctx.jobs()
+            if not jobs.has_room():
+                return self._error(HTTPStatus.TOO_MANY_REQUESTS, "too many files are waiting; try again shortly")
+            # Ingest needs the temporary copy plus roughly 2x the size again for the database.
+            need = length * 3 + 100 * 1024 * 1024
+            free = shutil.disk_usage(jobs.work_dir).free
+            if free < need:
+                return self._error(HTTPStatus.INSUFFICIENT_STORAGE,
+                                   f"not enough free disk space: about {need // 2 ** 20} MB needed, {free // 2 ** 20} MB free")
+            tmp = jobs.new_upload_path()
+            received = 0
+            try:
+                with open(tmp, "wb") as out:
+                    while received < length:
+                        block = self.rfile.read(min(CHUNK, length - received))
+                        if not block:
+                            raise ConnectionError("the upload was cut short")
+                        out.write(block)
+                        received += len(block)
+                        self._unread = length - received
+            except (OSError, ConnectionError, TimeoutError) as exc:
+                tmp.unlink(missing_ok=True)
+                sys.stderr.write(f"[ui] upload of {name!r} failed after {received} bytes: {type(exc).__name__}\n")
+                try:
+                    self._error(HTTPStatus.BAD_REQUEST, "the upload did not complete")
+                except OSError:
+                    pass  # the browser is already gone
+                return
+            try:
+                self._json(HTTPStatus.ACCEPTED, api.start_upload(ctx, name, tmp, length))
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
 
         def do_PUT(self) -> None:
             self._error(HTTPStatus.METHOD_NOT_ALLOWED, "method not allowed")
@@ -242,3 +336,4 @@ def serve(ctx: Context, host: str = "127.0.0.1", port: int = 8765, open_browser:
         print("\nstopped")
     finally:
         server.server_close()
+        ctx.close()

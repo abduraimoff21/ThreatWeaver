@@ -25,8 +25,10 @@ from ..feeds import FEEDS, FeedError, fetch_text, load_feed
 from ..pipeline import run
 from ..report import _safe_field, render_markdown, verify_traceability
 from ..triage import RULE_DESCRIPTIONS
+from .jobs import JobManager
 
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # files streamed to disk and processed in the background
+MAX_PASTE_BYTES = 20 * 1024 * 1024  # pasted text travels as JSON, so it stays small
 MAX_SIGHTINGS = 50
 PAGE_SIZE_MAX = 200
 LEVELS = ("high", "medium", "low", "info")
@@ -49,9 +51,25 @@ class Context:
     env: dict[str, str] | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
     _cache: tuple[tuple, Any] | None = None
+    _jobs: JobManager | None = None
 
     def connect(self) -> sqlite3.Connection:
         return store.connect(self.db_path)
+
+    def jobs(self) -> JobManager:
+        with self.lock:
+            if self._jobs is None:
+                self._jobs = JobManager(self.db_path)
+            return self._jobs
+
+    def require_idle(self) -> None:
+        """Writes would queue behind (and time out against) a large file being ingested."""
+        if self._jobs is not None and self._jobs.busy():
+            raise ApiError(409, "a large file is still being processed; wait until it finishes, then try again")
+
+    def close(self) -> None:
+        if self._jobs is not None:
+            self._jobs.close()
 
     def environ(self) -> dict[str, str]:
         return dict(os.environ) if self.env is None else self.env
@@ -76,7 +94,7 @@ class Analysis:
     """One consistent snapshot: correlation, triage and the report, built from the database."""
 
     def __init__(self, conn: sqlite3.Connection):
-        pr = run(conn, generated_at=None)
+        pr = run(conn, generated_at=None, persist=False)
         self.result, self.verdicts, self.report = pr.result, pr.verdicts, pr.report
         self.indicators: dict[int, dict[str, Any]] = {}
         self.case_of: dict[int, str] = {}
@@ -147,23 +165,42 @@ def overview(ctx: Context) -> dict[str, Any]:
             "sources": [s for s in sources if s["kind"] != "feed"], "feeds": feeds,
             "generated_at": a.report["generated_at"],
             "empty": a.report["summary"]["indicators"] == 0,
+            "limits": {"upload_bytes": MAX_UPLOAD_BYTES, "paste_bytes": MAX_PASTE_BYTES},
         }
     finally:
         conn.close()
 
 
-def cases(ctx: Context) -> dict[str, Any]:
+CASES_PAGE = 200
+
+
+def _is_quiet(case: dict[str, Any]) -> bool:
+    return not case["links"] and case["max_level"] == "info"
+
+
+def cases(ctx: Context, query: dict[str, str] | None = None) -> dict[str, Any]:
+    """One page of cases, highest priority first. Quiet ones (a lone, unremarkable indicator) are hidden
+    unless asked for: with hundreds of thousands of indicators the full list would be enormous."""
+    query = query or {}
+    include_quiet = query.get("quiet") == "1"
     conn = ctx.connect()
     try:
         a = analysis(ctx, conn)
-        out = []
-        for case in a.report["cases"]:
-            out.append({
+        everything = a.report["cases"]
+        quiet_total = sum(1 for c in everything if _is_quiet(c))
+        chosen = everything if include_quiet else [c for c in everything if not _is_quiet(c)]
+        limit = _int(query.get("limit"), CASES_PAGE, 1, 500)
+        offset = _int(query.get("offset"), 0, 0, 10**9)
+        page = chosen[offset:offset + limit]
+        return {
+            "cases": [{
                 "case_id": case["case_id"], "max_level": case["max_level"], "max_score": case["max_score"],
                 "size": len(case["indicators"]), "links": len(case["links"]),
-                "indicators": [_row(i, case["case_id"]) for i in case["indicators"]],
-            })
-        return {"cases": out}
+                "indicators": [_row(i, case["case_id"]) for i in case["indicators"][:6]],
+            } for case in page],
+            "total": len(chosen), "all_cases": len(everything), "quiet_cases": quiet_total,
+            "offset": offset, "limit": limit,
+        }
     finally:
         conn.close()
 
@@ -196,25 +233,27 @@ def indicators(ctx: Context, query: dict[str, str]) -> dict[str, Any]:
         kind, level = query.get("type", ""), query.get("level", "")
         needle = query.get("q", "").strip().lower()
         source = query.get("source", "").strip().lower()
-        rows = []
+        matches = []
         for ind in a.indicators.values():
             if kind and ind["type"] != kind:
                 continue
             if level and ind["level"] != level:
                 continue
-            sources = ind["sources"]
-            if source and not any(source in s.lower() for s in sources):
+            if source and not any(source in s.lower() for s in ind["sources"]):
                 continue
             if needle and needle not in ind["value"].lower() and needle not in defang(ind["value"]).lower():
                 continue
-            row = _row(ind, a.case_of[ind["id"]])
-            row.update(sightings=ind["sightings_total"], sources=sources,
-                       feed_matches=ind["feed_matches_total"], rules=[r["rule"] for r in ind["rules"]])
-            rows.append(row)
-        rows.sort(key=lambda r: (-r["score"], -r["sightings"], r["type"], r["value"]))
+            matches.append(ind)
+        matches.sort(key=lambda i: (-i["score"], -i["sightings_total"], i["type"], i["value"]))
         limit = _int(query.get("limit"), 50, 1, PAGE_SIZE_MAX)
         offset = _int(query.get("offset"), 0, 0, 10**9)
-        return {"total": len(rows), "offset": offset, "limit": limit, "rows": rows[offset:offset + limit]}
+        rows = []
+        for ind in matches[offset:offset + limit]:  # rows are built for the visible page only
+            row = _row(ind, a.case_of[ind["id"]])
+            row.update(sightings=ind["sightings_total"], sources=ind["sources"],
+                       feed_matches=ind["feed_matches_total"], rules=[r["rule"] for r in ind["rules"]])
+            rows.append(row)
+        return {"total": len(matches), "offset": offset, "limit": limit, "rows": rows}
     finally:
         conn.close()
 
@@ -329,16 +368,22 @@ def report_download(ctx: Context, fmt: str) -> tuple[bytes, str, str]:
 
 
 # ------------------------------------------------------------------ actions
+def clean_name(raw: Any) -> str:
+    """A display name for a source: no folders, no control characters, at most 120 characters."""
+    name = str(raw or "").replace("\\", "/").rsplit("/", 1)[-1]
+    return _CONTROL.sub("", name).strip()[:120]
+
+
 def ingest(ctx: Context, body: dict[str, Any]) -> dict[str, Any]:
-    name = str(body.get("name", "")).replace("\\", "/").rsplit("/", 1)[-1]
-    name = _CONTROL.sub("", name).strip()[:120]
+    ctx.require_idle()
+    name = clean_name(body.get("name"))
     text = body.get("text")
     if not name:
         raise ApiError(400, "a file name is required")
     if not isinstance(text, str):
         raise ApiError(400, "text content is required")
-    if len(text.encode("utf-8")) > MAX_UPLOAD_BYTES:
-        raise ApiError(413, f"file is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+    if len(text.encode("utf-8")) > MAX_PASTE_BYTES:
+        raise ApiError(413, f"pasted text is larger than {MAX_PASTE_BYTES // (1024 * 1024)} MB; upload it as a file instead")
     with ctx.lock:
         conn = ctx.connect()
         try:
@@ -349,7 +394,18 @@ def ingest(ctx: Context, body: dict[str, Any]) -> dict[str, Any]:
             "new_indicators": res.new_iocs, "sightings": res.new_observations, "rejected": res.rejected}
 
 
+def start_upload(ctx: Context, name: str, path: Path, size: int) -> dict[str, Any]:
+    """Register a file the server has already streamed to disk; it is processed in the background."""
+    job = ctx.jobs().submit(name, path, size)
+    return {"job": job.to_dict()}
+
+
+def jobs_status(ctx: Context) -> dict[str, Any]:
+    return ctx.jobs().listing() if ctx._jobs is not None else {"jobs": [], "active": 0}
+
+
 def fetch_feed(ctx: Context, body: dict[str, Any]) -> dict[str, Any]:
+    ctx.require_idle()
     name = body.get("feed")
     spec = FEEDS.get(name) if isinstance(name, str) else None
     if spec is None:
@@ -413,6 +469,7 @@ def advisory_check(ctx: Context, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _advisory_action(ctx: Context, adv_id: int | None, fn: Callable[[sqlite3.Connection], Any]) -> dict[str, Any]:
+    ctx.require_idle()
     with ctx.lock:
         conn = ctx.connect()
         try:

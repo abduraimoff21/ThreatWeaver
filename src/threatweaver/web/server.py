@@ -23,6 +23,7 @@ import json
 import re
 import secrets
 import shutil
+import socket
 import sys
 import threading
 import webbrowser
@@ -40,6 +41,7 @@ STATIC_FILES = {"app.js": "text/javascript; charset=utf-8", "style.css": "text/c
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 JSON_BODY_SLACK = 1024 * 1024  # JSON bodies may be this much larger than the paste limit
 CHUNK = 1024 * 1024
+TOKEN_BYTES = 12  # 16 URL-safe characters
 DRAIN_AUTH_FAILURE = 1024 * 1024  # after a 403 we only swallow a little of what an unauthenticated client sends
 DRAIN_IDLE_SECONDS = 5
 
@@ -59,6 +61,21 @@ ADV_ACTIONS = {
     "edit": api.advisory_edit, "submit": api.advisory_submit, "approve": api.advisory_approve,
     "reject": api.advisory_reject, "publish": api.advisory_publish,
 }
+
+
+class DashboardServer(ThreadingHTTPServer):
+    """On Windows, SO_REUSEADDR lets a second process bind a port that is already being listened on, and
+    the operating system then hands connections to either one. A stale dashboard could answer your browser
+    with a different access token than the one printed by the new dashboard. Binding exclusively makes a
+    second dashboard pick the next free port instead. (On other systems SO_REUSEADDR only allows a quick
+    restart, so it stays on.)"""
+
+    allow_reuse_address = not hasattr(socket, "SO_EXCLUSIVEADDRUSE")
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 def make_handler(ctx: Context, token: str, port: int) -> type[BaseHTTPRequestHandler]:
@@ -307,11 +324,13 @@ def make_handler(ctx: Context, token: str, port: int) -> type[BaseHTTPRequestHan
 def create_server(ctx: Context, host: str = "127.0.0.1", port: int = 8765, token: str | None = None) -> tuple[ThreadingHTTPServer, str]:
     if host not in LOOPBACK:
         raise ValueError("the dashboard only listens on loopback (127.0.0.1); it will not expose your data to the network")
-    token = token or secrets.token_urlsafe(24)
+    # 96 bits is ample for a per-run, loopback-only secret, and keeps the whole link under 50 characters so it
+    # does not wrap in a narrow terminal (a wrapped link breaks when copied).
+    token = token or secrets.token_urlsafe(TOKEN_BYTES)
     server = None
     for candidate in ([port] if port == 0 else range(port, port + 20)):  # first free port from the one requested
         try:
-            server = ThreadingHTTPServer((host, candidate), lambda *a, **k: None)  # real handler is set below
+            server = DashboardServer((host, candidate), lambda *a, **k: None)  # real handler is set below
             break
         except OSError:
             continue
@@ -324,9 +343,13 @@ def create_server(ctx: Context, host: str = "127.0.0.1", port: int = 8765, token
 
 def serve(ctx: Context, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
     server, token = create_server(ctx, host, port)
-    url = f"http://127.0.0.1:{server.server_address[1]}/?token={token}"
+    chosen = server.server_address[1]
+    url = f"http://127.0.0.1:{chosen}/?token={token}"
+    if port and chosen != port:
+        print(f"Port {port} is already in use (is another dashboard still running?), so this one uses port {chosen}.")
     print(f"ThreatWeaver dashboard for {ctx.db_path}")
-    print(f"Open: {url}")
+    print("Your browser should open by itself. If not, copy this whole link (it holds the access token):")
+    print(url)
     print("Listening on loopback only. Press Ctrl+C to stop.")
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()

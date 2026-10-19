@@ -637,3 +637,42 @@ def test_indicator_search_still_finds_quiet_indicators_that_the_cases_page_hides
     assert web.get("/api/cases")[1]["total"] == 1
     _, found = web.get("/api/indicators?q=11.9.9.9")
     assert found["total"] == 1 and found["rows"][0]["value"] == "11.9.9.9"
+
+
+def test_the_access_link_is_short_enough_not_to_wrap_in_a_narrow_terminal(ctx):
+    """A link that wraps mid-token breaks when copied (it did, in a 66-column terminal panel)."""
+    import re
+
+    server, token = create_server(ctx, port=0)
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/?token={token}"
+        assert len(token) == 16 and re.fullmatch(r"[A-Za-z0-9_-]{16}", token)
+        assert len(url) < 50
+        assert create_server(ctx, port=0)[1] != token  # still random per run
+    finally:
+        server.server_close()
+
+
+def test_a_second_dashboard_never_shares_a_port_with_a_running_one(ctx):
+    """On Windows a second bind to a listening port used to succeed, and connections then went to either process,
+    so a stale dashboard could answer with a different token than the new dashboard printed."""
+    first, token1 = create_server(ctx, port=0)
+    busy = first.server_address[1]
+    threading.Thread(target=first.serve_forever, daemon=True).start()
+    second = None
+    try:
+        second, token2 = create_server(ctx, port=busy)  # asks for the busy port
+        assert second.server_address[1] != busy  # moved to the next free port instead of sharing it
+        assert token1 != token2
+        threading.Thread(target=second.serve_forever, daemon=True).start()
+        for srv, token in ((first, token1), (second, token2)):
+            port = srv.server_address[1]
+            status, _, _ = Client(srv, token).request("GET", f"/?token={token}", token=False)
+            assert status == 200, f"the dashboard on {port} must accept its own token"
+        # and every request to the busy port reaches the first dashboard, never the second
+        other = Client(first, token2).request("GET", f"/?token={token2}", token=False)[0]
+        assert other == 403
+    finally:
+        first.shutdown(); first.server_close()
+        if second:
+            second.shutdown(); second.server_close()

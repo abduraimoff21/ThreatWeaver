@@ -7,10 +7,6 @@ deleting duplicates would lose the provenance, so duplicates are collapsed by
 construction and the evidence is kept in `observations`.
 
 Ingesting the same source content twice is a no-op.
-
-The `plan` and `feedback` tables belong to the first and last stages of the
-intelligence cycle (see lifecycle.py). Analysis never reads them, so writing
-to them does not invalidate a finished analysis.
 """
 
 from __future__ import annotations
@@ -114,23 +110,6 @@ CREATE TABLE IF NOT EXISTS advisory_events (
     content_sha256 TEXT NOT NULL,
     note           TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE IF NOT EXISTS plan (
-    id          INTEGER PRIMARY KEY,
-    requirement TEXT NOT NULL,
-    audience    TEXT NOT NULL,
-    marking     TEXT NOT NULL,
-    author      TEXT NOT NULL,
-    created_at  TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS feedback (
-    id       INTEGER PRIMARY KEY,
-    ioc_id   INTEGER NOT NULL REFERENCES iocs(id),
-    verdict  TEXT NOT NULL,
-    note     TEXT NOT NULL DEFAULT '',
-    reviewer TEXT NOT NULL,
-    at       TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_feedback_ioc ON feedback(ioc_id);
 CREATE INDEX IF NOT EXISTS idx_intel_ioc ON intel(ioc_id);
 CREATE INDEX IF NOT EXISTS idx_rel_parent ON relations(parent_id);
 CREATE INDEX IF NOT EXISTS idx_rel_child ON relations(child_id);
@@ -434,7 +413,7 @@ def remove_source(
     batch: int = REMOVE_BATCH,
 ) -> RemovalResult:
     """Delete one uploaded file or pasted text: its sightings, its relations, and every indicator that was
-    seen nowhere else. Indicators that other sources, a feed or an analyst's verdict still refer to are kept.
+    seen nowhere else. Indicators that other sources or a feed still refer to are kept.
 
     Feed snapshots are not uploads and are refused. The correlation cache (`links`) is cleared because it
     was computed from data that has changed. Sightings go in batches, each its own transaction, so a source
@@ -479,8 +458,7 @@ def remove_source(
                 "AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.ioc_id = iocs.id) "
                 "AND NOT EXISTS (SELECT 1 FROM intel t WHERE t.ioc_id = iocs.id) "
                 "AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.parent_id = iocs.id) "
-                "AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.child_id = iocs.id) "
-                "AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.ioc_id = iocs.id)").rowcount
+                "AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.child_id = iocs.id)").rowcount
             conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
             conn.execute("DROP TABLE IF EXISTS temp.removing_iocs")
     finally:

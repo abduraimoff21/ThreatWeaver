@@ -240,13 +240,12 @@ def events(conn: sqlite3.Connection, advisory_id: int) -> list[sqlite3.Row]:
 
 
 # ------------------------------------------------------------ report -> draft
-def draft_from_report(report: dict[str, Any], leave_out: frozenset[tuple[str, str]] | set[tuple[str, str]] = frozenset()) -> tuple[str, str]:
+def draft_from_report(report: dict[str, Any]) -> tuple[str, str]:
     """Build a public-evidence-only advisory draft (title, Markdown body) from a report dict.
 
     Included: indicators rated medium or high that have a public feed record and a
     routable address. Excluded on purpose: local sightings, source names, internal
-    hosts, and indicators with no public evidence. `leave_out` holds (type, value)
-    pairs an analyst judged to be a false alarm or expected activity (see lifecycle.py).
+    hosts, and indicators with no public evidence.
     """
     rows: list[tuple[str, str, str, str]] = []
     families: set[str] = set()
@@ -254,8 +253,6 @@ def draft_from_report(report: dict[str, Any], leave_out: frozenset[tuple[str, st
     for case in report["cases"]:
         for ind in case["indicators"]:
             if ind["level"] not in ("high", "medium") or ind["scope"] in NON_ROUTABLE or not ind["feed_matches"]:
-                continue
-            if (ind["type"], ind["value"]) in leave_out:
                 continue
             listed = []
             for fm in ind["feed_matches"]:
@@ -268,8 +265,7 @@ def draft_from_report(report: dict[str, Any], leave_out: frozenset[tuple[str, st
                 snapshots[fm["feed"]] = (fm["collected_at"], fm["snapshot_sha256"])
             rows.append((ind["level"], ind["type"], defang(ind["value"]), "; ".join(dict.fromkeys(listed))))
     if not rows:
-        raise ValueError("no indicators with public feed evidence at medium or high level; nothing to advise on"
-                         + (" (indicators marked as false alarms or expected were left out)" if leave_out else ""))
+        raise ValueError("no indicators with public feed evidence at medium or high level; nothing to advise on")
     rows.sort(key=lambda r: (r[0] != "high", r[1], r[2]))
 
     date = report["generated_at"][:10]

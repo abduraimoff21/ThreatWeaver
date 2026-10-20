@@ -110,9 +110,7 @@ async function openIndicator(id) {
     h('h2', { class: 'mono' }, val(d)),
     h('p', {}, d.suggested_action),
     d.scope && d.scope !== 'global' ? h('p', { class: 'small muted' }, `Address scope: ${d.scope}`) : null,
-    h('p', { class: 'small' }, 'Case: ', h('button', { class: 'link', onclick: () => { closeDrawer(); location.hash = '#/case/' + d.case_id; } }, d.case_id),
-      d.feedback && d.feedback.length ? [' Latest verdict: ', verdictTag(d.feedback[0].label)] : null),
-    d.feedback ? drawerFeedback(d) : null,
+    h('p', { class: 'small' }, 'Case: ', h('button', { class: 'link', onclick: () => { closeDrawer(); location.hash = '#/case/' + d.case_id; } }, d.case_id)),
     h('h3', {}, 'Why this level'),
     d.rules.length ? d.rules.map((r) => h('div', { class: 'rule ' + (r.points >= 0 ? 'pos' : 'neg') },
       h('span', { class: 'pts' }, (r.points >= 0 ? '+' : '') + r.points), ' ', h('b', {}, r.rule), ' ', h('span', { class: 'muted' }, r.description),
@@ -518,258 +516,46 @@ function drawGraph(data) {
 }
 
 /* ---------- views ---------- */
-/* ---------- the intelligence cycle ----------
- * The dashboard follows the six stages of the intelligence cycle, in order. Each stage says in plain words what
- * it is for, what you do, and what ThreatWeaver does; the home page shows where you are and the one thing to do next. */
-const STAGES = [
-  { key: 'plan', n: 1, name: 'Plan', short: 'Decide what you need to know', href: '#/plan' },
-  { key: 'collect', n: 2, name: 'Collect', short: 'Gather your logs, reports and public feeds', href: '#/collect' },
-  { key: 'process', n: 3, name: 'Process', short: 'Pull out the facts and clean them up', href: '#/process' },
-  { key: 'analyse', n: 4, name: 'Analyse', short: 'See what is connected and what matters', href: '#/analyse' },
-  { key: 'share', n: 5, name: 'Share', short: 'Write it up; a second person approves advice', href: '#/share' },
-  { key: 'feedback', n: 6, name: 'Feedback', short: 'Say what was right or wrong, then go round again', href: '#/feedback' },
-];
-const STAGE_TEXT = {
-  plan: { purpose: 'Decide what you need to know before you look at any data. A clear question keeps the rest of the work pointed at something.',
-    you: 'Write one question and say who it is for.', tool: 'Keeps your question with the report, so the answer is tied to it.' },
-  collect: { purpose: 'Gather the raw material: your own logs, reports and emails, and, if you want, public lists of known-bad infrastructure.',
-    you: 'Drop in files or paste text. Downloading the feeds is optional.', tool: 'Keeps every file with a fingerprint (SHA-256), so any result can be traced back to its source.' },
-  process: { purpose: 'Turn messy text into clean, comparable facts.',
-    you: 'Nothing: this happens on its own. Check the summary looks right.', tool: 'Finds IP addresses, domains, URLs, e-mail addresses, file names and hashes, writes each one in a standard way, and counts repeats once while remembering every place it was seen.' },
-  analyse: { purpose: 'Work out what is connected and what matters most.',
-    you: 'Start at the top of the list and open what looks important.', tool: 'Groups related indicators into cases, checks them against the feeds, and rates them with simple named rules. It suggests; it never acts.' },
-  share: { purpose: 'Turn what you found into something other people can use.',
-    you: 'Download the report. If you want to warn others, draft an advisory; a different person must approve it.', tool: 'Defangs every indicator, checks advisories for confidential content, and writes files only on this computer.' },
-  feedback: { purpose: 'Tell ThreatWeaver what was right and what was wrong, then go round again with a better question.',
-    you: 'Mark a few indicators: real threat, false alarm, keep watching, or expected.', tool: 'Shows how well the ratings held up and keeps false alarms out of advisory drafts. It never changes a score by itself.' },
-};
-const VERDICTS = [
-  ['confirmed', 'Real threat', 'Malicious, or needs action.'],
-  ['false_positive', 'False alarm', 'The rating was wrong: this is harmless.'],
-  ['watch', 'Keep watching', 'Not sure yet.'],
-  ['expected', 'Expected / normal', 'It is ours, or normal activity.'],
-];
-const STATE_LABEL = { done: 'Done', ready: 'Ready', todo: 'To do', working: 'Working', waiting: 'Waiting' };
-const TYPE_LABEL = { ipv4: 'IPv4 addresses', ipv6: 'IPv6 addresses', domain: 'Domains', url: 'URLs', email: 'E-mail addresses', filename: 'File names', md5: 'MD5 hashes', sha1: 'SHA-1 hashes', sha256: 'SHA-256 hashes' };
-const verdictTag = (label) => h('span', { class: 'tag verdict' }, label);
-
-let statusCache = null;
-async function getStatus() {
-  statusCache = await api('/api/status');
-  state.uploadLimit = statusCache.limits.upload_bytes;
-  paintNav();
-  return statusCache;
-}
-function paintNav() {
-  if (!statusCache) return;
-  for (const st of statusCache.stages) {
-    const dot = document.querySelector(`.nav a[data-k="${st.key}"] .dot`);
-    if (dot) { dot.className = 'dot ' + st.state; dot.title = `${STATE_LABEL[st.state]}: ${st.line}`; }
-  }
-  const next = statusCache.next && statusCache.next.stage;
-  document.querySelectorAll('.nav a[data-k]').forEach((a) => a.classList.toggle('next', a.dataset.k === next));
-}
-
-function tabBar(tabs, active) {
-  return h('div', { class: 'tabs', role: 'tablist' }, tabs.map(([key, label, href]) =>
-    h('a', { href, role: 'tab', class: 'tab', 'aria-selected': String(key === active), 'aria-current': key === active ? 'page' : null }, label)));
-}
-
-/* The same frame for every stage: what it is for, who does what, then the work, then a way on. */
-function stagePage(key, { tabs = null, active = null, body }) {
-  const i = STAGES.findIndex((s) => s.key === key);
-  const st = STAGES[i], t = STAGE_TEXT[key], prev = STAGES[i - 1], next = STAGES[i + 1];
-  return h('div', {},
-    h('div', { class: 'stagehead' },
-      h('div', { class: 'stepno' }, `Step ${st.n} of ${STAGES.length}`),
-      h('p', { class: 'purpose' }, t.purpose),
-      h('div', { class: 'roles' }, h('div', {}, h('b', {}, 'You: '), t.you), h('div', {}, h('b', {}, 'ThreatWeaver: '), t.tool))),
-    tabs ? tabBar(tabs, active) : null,
-    body,
-    h('div', { class: 'stagefoot' },
-      prev ? h('a', { class: 'btnlink', href: prev.href }, `← ${prev.name}`) : h('span', {}),
-      h('a', { class: 'btnlink primary', href: next ? next.href : '#/plan' }, next ? `Next: ${next.name} →` : 'Go round again: Plan →')));
-}
-
-/* ---------- home: where you are in the cycle ---------- */
-async function viewHome() {
-  const s = await getStatus();
-  const n = s.next;
-  const working = [...activity.values()].some((a) => ['uploading', 'queued', 'processing'].includes(a.phase));
-  return h('div', {},
-    h('div', { class: 'nextcard' },
-      h('div', { class: 'stepno' }, 'Your next step'),
-      h('h2', {}, n.headline), h('p', {}, n.text),
-      h('a', { class: 'btnlink primary', href: n.href }, n.button + ' →')),
-    working ? h('div', { class: 'banner' }, h('b', {}, 'A file is being processed. '), 'You can keep using the dashboard; results appear when it finishes.') : null,
-    h('h2', { class: 'cyclehead' }, 'The intelligence cycle'),
-    h('p', { class: 'muted' }, 'Six steps, always in this order. Each one feeds the next, and the last feeds back into the first.'),
-    h('div', { class: 'cyclecards' }, s.stages.map((st, i) => {
-      const info = STAGES[i];
-      return h('a', { class: 'stagecard ' + st.state + (s.next.stage === st.key ? ' next' : ''), href: info.href },
-        h('span', { class: 'num' }, String(st.n)),
-        h('div', {}, h('b', {}, st.name), h('div', { class: 'small muted' }, info.short),
-          h('div', { class: 'statusline' }, h('span', { class: 'state ' + st.state }, STATE_LABEL[st.state]), ' ', st.line.length > 90 ? st.line.slice(0, 89) + '…' : st.line)));
-    })));
-}
-
-/* ---------- 1 Plan ---------- */
-async function viewPlan() {
-  const s = await getStatus();
-  const cur = s.plan;
-  const q = h('textarea', { class: 'short prose', 'aria-label': 'Your question', placeholder: 'For example: Which addresses in these logs need attention first?', maxlength: 500 });
-  q.value = cur ? cur.requirement : '';
-  const aud = h('input', { type: 'text', class: 'wide', 'aria-label': 'Who is it for', placeholder: 'For example: the SOC team, or IT management', maxlength: 200, value: cur ? cur.audience : '' });
-  const mark = h('select', { 'aria-label': 'How far it may be shared' }, Object.entries(s.markings).map(([k, v]) => h('option', { value: k, selected: k === (cur ? cur.marking : 'TLP:GREEN') }, `${k}: ${v}`)));
-  const name = h('input', { type: 'text', 'aria-label': 'Your name', placeholder: 'your name', maxlength: 80, value: remember('name') });
-  const save = h('button', { class: 'primary', onclick: async () => {
-    if (!name.value.trim()) { toast('Enter your name first', 'err'); name.focus(); return; }
-    remember('name', name.value);
-    const r = await guarded(() => api('/api/plan', { requirement: q.value, audience: aud.value, marking: mark.value, author: name.value }));
-    if (r) { toast('Question saved. Next: collect something to look at.', 'ok'); route(); }
-  } }, cur ? 'Save a new version' : 'Save the question');
-  return stagePage('plan', { body: h('div', {},
-    cur ? h('div', { class: 'panel current' }, h('div', { class: 'small muted' }, `Current question (version ${cur.revisions}, set by ${cur.author} on ${cur.created_at.slice(0, 10)})`),
-      h('p', { class: 'bigtext' }, cur.requirement),
-      h('div', { class: 'small' }, `For: ${cur.audience || 'not stated'}. Handling: `, h('b', {}, cur.marking), ` (${cur.marking_meaning})`)) : null,
-    h('div', { class: 'panel' }, h('h2', {}, cur ? 'Change the question' : 'What do you want to find out?'),
-      h('div', { class: 'field' }, h('label', {}, 'Your question'), q),
-      h('div', { class: 'small muted' }, 'Or start from an example:'),
-      h('div', { class: 'chips' }, s.examples.map((t) => h('button', { type: 'button', class: 'chip', onclick: () => { q.value = t; q.focus(); } }, t))),
-      h('div', { class: 'field' }, h('label', {}, 'Who is it for? (optional)'), aud),
-      h('div', { class: 'field' }, h('label', {}, 'How far may the findings be shared?'), mark,
-        h('div', { class: 'small muted' }, 'This is the Traffic Light Protocol. It is printed on the report so readers know what they may do with it. Advisories are always TLP:CLEAR, because they use only public feed evidence.')),
-      h('div', { class: 'field' }, h('label', {}, 'Your name'), name),
-      h('div', { class: 'toolbar' }, save))) });
-}
-
-/* ---------- 2 Collect ---------- */
 /* Removing an earlier upload: confirmed first, then done in the background like an upload. */
 function removeSourceButton(src) {
   return h('button', { class: 'danger', 'aria-label': `Remove ${src.name}`, onclick: async (e) => {
     const btn = e.currentTarget;
-    const ok = confirm(`Remove "${src.name}"?\n\nThis permanently deletes everything ThreatWeaver extracted from it: every sighting, and every indicator that was seen nowhere else. Cases, the graph and reports will stop including it. Verdicts you gave are kept. The original file on your computer is not touched, and you can add it again later.\n\nA very large file can take a few minutes to remove.`);
+    const ok = confirm(`Remove "${src.name}"?\n\nThis permanently deletes everything ThreatWeaver extracted from it: every sighting, and every indicator that was seen nowhere else. Cases, the graph and reports will stop including it. The original file on your computer is not touched, and you can add it again later.\n\nA very large file can take a few minutes to remove.`);
     if (!ok) return;
     btn.disabled = true;
     const r = await guarded(() => api('/api/sources/remove', { source_id: src.id, confirmed: true }));
     if (r) { toast(`Removing ${src.name} in the background`, 'ok'); await pollJobs(); } else btn.disabled = false;
   } }, 'Remove');
 }
+const SOURCE_HINT = 'Remove deletes what was extracted from a file (its sightings, and indicators seen nowhere else), not the file on your computer. You can add it again later.';
 
-async function viewCollect() {
-  const s = await getStatus();
-  const sources = s.sources.length ? h('div', { class: 'panel' }, h('h2', {}, 'What you have collected'),
-    table(['Name', 'Added', 'SHA-256 (pins the exact content)', ''], s.sources.map((x) => ({ data: x, cells: [cell(x.name), cell(x.ingested_at), cell(x.sha256, 'val'), nodeCell(removeSourceButton(x))] }))),
-    h('p', { class: 'small muted' }, 'Remove deletes what was extracted from a file (its sightings, and indicators seen nowhere else), not the file on your computer. You can add it again later.'))
-    : h('div', { class: 'panel muted' }, 'Nothing collected yet. Drop a file above, or paste some text.');
-  return stagePage('collect', { body: h('div', {}, h('div', { class: 'grid cols-2' }, addDataPanel(), feedsPanel(s.feeds)), sources) });
-}
-
-/* ---------- 3 Process ---------- */
-const PROCESS_TABS = [['process', 'Summary', '#/process'], ['indicators', 'Indicators', '#/indicators']];
-async function viewProcess() {
-  const s = await getStatus();
-  const p = s.process;
-  if (!p.indicators) return stagePage('process', { tabs: PROCESS_TABS, active: 'process',
-    body: h('div', { class: 'panel muted' }, 'Nothing to process yet. Add a file or some text in ', h('a', { href: '#/collect' }, 'step 2'), '. This step runs on its own once there is data.') });
-  const steps = [
-    ['Found', p.sightings.toLocaleString(), 'places in your data where something looked like an indicator'],
-    ['Cleaned', '', 'the same thing written two ways becomes one (upper or lower case, [.] defanging, IPv6 shorthand)'],
-    ['De-duplicated', p.indicators.toLocaleString(), 'distinct indicators, each remembering every place it was seen'],
-  ];
-  return stagePage('process', { tabs: PROCESS_TABS, active: 'process', body: h('div', {},
-    h('div', { class: 'pipeline' }, steps.map(([name, n, text], i) => h('div', { class: 'pipestep' },
-      h('div', { class: 'small muted' }, `${i + 1}. ${name}`), n ? h('div', { class: 'bignum' }, n) : h('div', { class: 'bignum' }, '✓'), h('div', { class: 'small' }, text)))),
-    h('div', { class: 'panel' }, h('h2', {}, 'What was found'),
-      table(['Kind', 'Distinct'], Object.entries(p.by_type).map(([k, v]) => ({ data: k, cells: [cell(TYPE_LABEL[k] || k), cell(v.toLocaleString())] }))),
-      h('p', { class: 'small muted' }, 'Look through them on the Indicators tab. Nothing is lost by de-duplicating: every sighting is kept, with the original text and its position.'))) });
-}
-async function viewIndicatorsStage() {
-  return stagePage('process', { tabs: PROCESS_TABS, active: 'indicators', body: await viewIndicators() });
-}
-
-/* ---------- 4 Analyse ---------- */
-const ANALYSE_TABS = [['analyse', 'Priorities', '#/analyse'], ['graph', 'Link graph', '#/graph']];
-async function viewAnalyse() { return stagePage('analyse', { tabs: ANALYSE_TABS, active: 'analyse', body: await viewCases() }); }
-async function viewGraphStage() { return stagePage('analyse', { tabs: ANALYSE_TABS, active: 'graph', body: await viewGraph() }); }
-async function viewCaseStage(id) { return stagePage('analyse', { tabs: ANALYSE_TABS, active: 'analyse', body: await viewCase(id) }); }
-
-/* ---------- 5 Share ---------- */
-const SHARE_TABS = [['share', 'Report', '#/share'], ['advisories', 'Advisories', '#/advisories']];
-async function shareBody(active, inner) {
-  const s = await getStatus();
-  const plan = s.plan;
-  const note = plan ? h('div', { class: 'banner ok' }, h('b', {}, `Handling: ${plan.marking}. `), plan.marking_meaning, ' ',
-    'Advisories are always TLP:CLEAR: they use only public feed evidence, never your own logs.')
-    : h('div', { class: 'banner' }, h('b', {}, 'No handling level set. '), 'Choose one in ', h('a', { href: '#/plan' }, 'step 1'), ' so readers know how far the report may travel.');
-  return stagePage('share', { tabs: SHARE_TABS, active, body: h('div', {}, note, await inner()) });
-}
-const viewShareReport = () => shareBody('share', viewReport);
-const viewShareAdvisories = () => shareBody('advisories', viewAdvisories);
-const viewShareAdvisory = (id) => shareBody('advisories', () => viewAdvisory(id));
-
-/* ---------- 6 Feedback ---------- */
-function reviewButtons(iocId, getName, getNote, after) {
-  const send = async (verdict, label) => {
-    const who = getName().trim();
-    if (!who) { toast('Enter your name first', 'err'); return; }
-    remember('name', who);
-    const r = await guarded(() => api('/api/feedback', { ioc_id: iocId, verdict, note: getNote ? getNote() : '', reviewer: who }));
-    if (r) { toast(`Saved: ${label}`, 'ok'); if (after) after(r.feedback); }
-  };
-  return h('div', { class: 'verdicts' }, VERDICTS.map(([v, label, help]) => h('button', { type: 'button', title: help, class: 'verdict ' + v, onclick: () => send(v, label) }, label)));
-}
-
-async function viewFeedback() {
-  const f = await api('/api/feedback');
-  await getStatus();
-  const name = h('input', { type: 'text', placeholder: 'your name', maxlength: 80, value: remember('name'), 'aria-label': 'Your name' });
-  const sm = f.summary;
-  const tiles = h('div', { class: 'tiles' }, [['Reviewed', sm.reviewed], ...VERDICTS.map(([v, label]) => [label, sm.by_verdict[v]])]
-    .map(([l, n]) => h('div', { class: 'tile' }, h('div', { class: 'n' }, n), h('div', { class: 'l' }, l))));
-
-  const queueRows = f.queue.map((i) => h('div', { class: 'queue-item' },
-    h('div', { class: 'queue-main' }, badge(i.level), ' ', typeTag(i.type), ' ', h('button', { class: 'link mono', onclick: () => openIndicator(i.id) }, val(i)), h('span', { class: 'small muted' }, ` score ${i.score}`)),
-    reviewButtons(i.id, () => name.value, null, () => route())));
-  const queue = h('div', { class: 'panel' }, h('h2', {}, 'Worth reviewing next'),
-    h('p', { class: 'small muted' }, f.queue.length ? (f.queue_is_quiet
-      ? 'Nothing here was rated above "info", so these are simply the most-seen indicators. Open one to see where it appeared.'
-      : 'The highest-rated indicators nobody has judged yet. Open one to see why it was rated that way, then say what you think.') : 'Nothing left to review.'),
-    h('div', { class: 'field', style: 'max-width:22rem' }, h('label', {}, 'Your name (saved with each verdict)'), name),
-    queueRows.length ? queueRows : null);
-
-  const reading = (r) => {
-    if (r.reviewed < 3) return '';
-    const bad = (r.false_positive + r.expected) / r.reviewed, good = r.confirmed / r.reviewed;
-    return bad >= 0.5 ? 'mostly false alarms' : good >= 0.5 ? 'mostly real' : 'mixed';
-  };
-  const accuracy = sm.reviewed ? h('div', { class: 'panel' }, h('h2', {}, 'How well did the ratings hold up?'),
-    table(['Suggested level', 'Reviewed', 'Real threat', 'False alarm', 'Keep watching', 'Expected', 'Reading'],
-      f.accuracy.map((r) => ({ data: r, cells: [nodeCell(badge(r.level)), cell(String(r.reviewed)), cell(String(r.confirmed)), cell(String(r.false_positive)), cell(String(r.watch)), cell(String(r.expected)), cell(reading(r))] }))),
-    h('p', { class: 'small muted' }, 'This is a guide, not a score: ThreatWeaver does not change a rating because of a verdict. If a level is mostly false alarms on your data, open an indicator of that level and read "Why this level": the rule that keeps firing is the one to question.')) : null;
-
-  const reviewed = h('div', { class: 'panel' }, h('h2', {}, 'Reviewed so far'),
-    f.items.length ? table(['Verdict', 'Level', 'Indicator', 'Note', 'By', 'When'], f.items.map((x) => ({ data: x, cells: [nodeCell(verdictTag(x.label)), x.level ? nodeCell(badge(x.level)) : cell('-'), cell(val(x), 'val'), cell(x.note), cell(x.reviewer), cell(x.at.slice(0, 16).replace('T', ' '))] })), (x) => openIndicator(x.id))
-      : h('p', { class: 'muted' }, 'No verdicts yet.'),
-    f.total > f.items.length ? h('p', { class: 'small muted' }, `Showing the newest ${f.items.length} of ${f.total}.`) : null,
-    h('p', { class: 'small muted' }, 'Indicators you mark "False alarm" or "Expected / normal" are left out of new advisory drafts. Every verdict is kept, with who said it and when, and the newest one counts.'));
-
-  const again = h('div', { class: 'panel nextcard' }, h('h2', {}, 'Go round again'),
-    h('p', {}, 'What you learned here should change what you ask or what you collect.'),
-    h('div', { class: 'toolbar' }, h('a', { class: 'btnlink primary', href: '#/plan' }, 'Refine the question'), h('a', { class: 'btnlink', href: '#/collect' }, 'Add more data')));
-  return stagePage('feedback', { body: h('div', {}, tiles, queue, accuracy, reviewed, again) });
-}
-
-/* The verdict box inside an indicator's detail panel. */
-function drawerFeedback(d) {
-  const name = h('input', { type: 'text', placeholder: 'your name', maxlength: 80, value: remember('name'), 'aria-label': 'Your name' });
-  const note = h('input', { type: 'text', placeholder: 'why? (optional)', maxlength: 500, 'aria-label': 'Note' });
-  return h('div', { class: 'panel' }, h('h3', {}, 'What do you think of this one?'),
-    h('p', { class: 'small muted' }, 'Your verdict is kept for the report and the Feedback step. It does not change the rating.'),
-    h('div', { class: 'toolbar' }, name, note),
-    reviewButtons(d.id, () => name.value, () => note.value, () => openIndicator(d.id)),
-    d.feedback.length ? h('div', { class: 'history' }, h('div', { class: 'small muted' }, 'Earlier verdicts, newest first'),
-      d.feedback.map((x) => h('div', { class: 'small' }, verdictTag(x.label), ` ${x.reviewer}, ${x.at.slice(0, 16).replace('T', ' ')}`, x.note ? ': ' + x.note : ''))) : null);
+async function viewOverview() {
+  const o = await api('/api/overview');
+  state.uploadLimit = o.limits.upload_bytes;
+  const sm = o.summary;
+  const max = Math.max(1, ...LEVELS.map((l) => sm.by_level[l]));
+  const root = h('div', {});
+  const working = [...activity.values()].some((a) => ['uploading', 'queued', 'processing'].includes(a.phase));
+  if (o.empty && working) {
+    root.append(h('div', { class: 'banner' }, h('b', {}, 'Your file is being processed. '), 'Results appear here when it finishes: a file is added all at once, so nothing shows until it is complete. You can keep using the dashboard.'));
+  } else if (o.empty) {
+    root.append(h('div', { class: 'banner' }, h('b', {}, 'No data yet. '), 'Add a log file or report below. ThreatWeaver extracts indicators, de-duplicates them, and shows what is connected.'));
+  }
+  root.append(h('div', { class: 'tiles' },
+    [['Indicators', sm.indicators], ['Cases', sm.cases], ['High', sm.by_level.high], ['Medium', sm.by_level.medium], ['Links', sm.links], ['Feed matches', sm.feed_matches]]
+      .map(([l, n]) => h('div', { class: 'tile' }, h('div', { class: 'n' }, n), h('div', { class: 'l' }, l)))));
+  root.append(h('div', { class: 'grid cols-2' },
+    h('div', { class: 'panel' }, h('h2', {}, 'Suggested priority'),
+      h('div', { class: 'bars' }, LEVELS.map((l) => h('div', { class: 'row' }, badge(l), h('div', { class: 'track' }, h('div', { class: 'fill ' + l, style: `width:${(sm.by_level[l] / max) * 100}%` })), h('span', { class: 'mono' }, sm.by_level[l])))),
+      h('p', { class: 'small muted' }, 'Levels are suggestions from simple, named rules. A person decides what to do.'),
+      h('div', { class: 'toolbar' }, h('button', { onclick: () => (location.hash = '#/cases') }, 'Open cases'), h('button', { onclick: () => (location.hash = '#/graph') }, 'Open link graph'))),
+    addDataPanel(),
+    feedsPanel(o.feeds)));
+  root.append(h('div', { class: 'panel' }, h('h2', {}, 'Your sources'),
+    o.sources.length ? [table(['Name', 'Indicators', 'Added', 'SHA-256', ''], o.sources.map((x) => ({ data: x, cells: [cell(x.name), cell(String(x.indicators)), cell(x.ingested_at), cell(x.sha256.slice(0, 12), 'val'), nodeCell(removeSourceButton(x))] }))),
+      h('p', { class: 'small muted' }, SOURCE_HINT)]
+      : h('p', { class: 'muted' }, 'No sources yet.')));
+  return root;
 }
 
 function addDataPanel() {
@@ -866,7 +652,7 @@ async function pollJobs() {
   clearTimeout(pollTimer);
   const busy = data.active > 0 || [...activity.values()].some((a) => a.phase === 'uploading');
   if (busy) pollTimer = setTimeout(pollJobs, 1000);
-  if (finishedNow && /^#\/?(overview|home|collect|process|indicators|analyse|cases|graph|feedback)?$/.test(location.hash)) route();
+  if (finishedNow && /^#\/?(overview|cases|indicators|graph|sources|report)?$/.test(location.hash)) route();
 }
 
 function renderActivity() {
@@ -921,18 +707,9 @@ function feedsPanel(feeds) {
     }));
 }
 
-/* How many indicators sit at each suggested level, and how much is linked: the first thing to read in step 4. */
-function prioritySummary(sm) {
-  const max = Math.max(1, ...LEVELS.map((l) => sm.by_level[l]));
-  return h('div', { class: 'panel' }, h('h2', {}, 'What ThreatWeaver found'),
-    h('div', { class: 'tiles' }, [['Indicators', sm.indicators], ['Cases', sm.cases], ['Links', sm.links], ['Feed matches', sm.feed_matches]]
-      .map(([l, n]) => h('div', { class: 'tile' }, h('div', { class: 'n' }, n.toLocaleString()), h('div', { class: 'l' }, l)))),
-    h('div', { class: 'bars' }, LEVELS.map((l) => h('div', { class: 'row' }, badge(l), h('div', { class: 'track' }, h('div', { class: 'fill ' + l, style: `width:${(sm.by_level[l] / max) * 100}%` })), h('span', { class: 'mono' }, sm.by_level[l].toLocaleString())))),
-    h('p', { class: 'small muted' }, 'Levels are suggestions from simple, named rules (open any indicator to read them). A person decides what to do. Start with the cases below, highest first.'));
-}
 async function viewCases() {
   const first = await api('/api/cases');
-  if (!first.all_cases) return empty('No cases yet. Add data in step 2 (Collect), then come back.');
+  if (!first.all_cases) return empty('No cases yet. Add data on the Overview page.');
   const list = h('div', { class: 'cards' });
   const count = h('span', { class: 'small muted' });
   const nav = h('div', { class: 'toolbar', style: 'margin-top:.75rem' });
@@ -950,8 +727,7 @@ async function viewCases() {
       h('button', { disabled: d.offset + d.limit >= d.total, onclick: () => { state2.offset = d.offset + d.limit; load(); } }, 'Next'));
   }
   const label = `Also show quiet cases (${first.quiet_cases.toLocaleString()}: a single indicator, nothing linked, nothing suspicious)`;
-  const wrap = h('div', {}, prioritySummary(first.summary),
-    h('p', { class: 'muted' }, 'A case is a group of indicators connected by strong links (a URL and its host, an e-mail address and its domain, the same log line, or a host name that spells out an IP). Highest suggested priority first. To search everything, use the Indicators tab in step 3.'),
+  const wrap = h('div', {}, h('p', { class: 'muted' }, 'A case is a group of indicators connected by strong links (a URL and its host, an e-mail address and its domain, the same log line, or a host name that spells out an IP). Highest suggested priority first. To search everything, use the Indicators page.'),
     h('div', { class: 'toolbar', style: 'margin-bottom:.75rem' }, h('label', { style: 'display:flex;gap:.35rem;align-items:center;margin:0' }, toggle, label), count), list, nav);
   state2.offset = 0;
   await load();
@@ -986,7 +762,7 @@ async function viewIndicators() {
     if (!d) return;
     results.replaceChildren(
       h('p', { class: 'small muted' }, `${d.total} indicator(s)`),
-      d.rows.length ? table(['Level', 'Score', 'Type', 'Indicator', 'Seen', 'Sources', 'Feeds', 'Your verdict'], d.rows.map((i) => ({ data: i, cells: [nodeCell(badge(i.level)), cell(String(i.score)), cell(i.type), cell(val(i), 'val'), cell(String(i.sightings)), cell(i.sources.join(', ')), cell(i.feed_matches ? String(i.feed_matches) : '-'), i.verdict ? nodeCell(verdictTag(i.verdict)) : cell('-')] })), (i) => openIndicator(i.id)) : empty('Nothing matches these filters.'),
+      d.rows.length ? table(['Level', 'Score', 'Type', 'Indicator', 'Seen', 'Sources', 'Feeds'], d.rows.map((i) => ({ data: i, cells: [nodeCell(badge(i.level)), cell(String(i.score)), cell(i.type), cell(val(i), 'val'), cell(String(i.sightings)), cell(i.sources.join(', ')), cell(i.feed_matches ? String(i.feed_matches) : '-')] })), (i) => openIndicator(i.id)) : empty('Nothing matches these filters.'),
       h('div', { class: 'toolbar', style: 'margin-top:.75rem' },
         h('button', { disabled: f.offset === 0, onclick: () => { f.offset = Math.max(0, f.offset - 50); load(); } }, 'Previous'),
         h('button', { disabled: f.offset + 50 >= d.total, onclick: () => { f.offset += 50; load(); } }, 'Next')));
@@ -1044,7 +820,8 @@ async function viewGraph() {
 
 async function viewSources() {
   const { sources } = await api('/api/sources');
-  return sources.length ? h('div', { class: 'panel' }, table(['Name', 'Indicators', 'Added', 'SHA-256 (pins the exact content analysed)'], sources.map((x) => ({ data: x, cells: [cell(x.name), cell(String(x.indicators)), cell(x.ingested_at), cell(x.sha256, 'val')] }))))
+  return sources.length ? h('div', { class: 'panel' }, table(['Name', 'Indicators', 'Added', 'SHA-256 (pins the exact content analysed)', ''], sources.map((x) => ({ data: x, cells: [cell(x.name), cell(String(x.indicators)), cell(x.ingested_at), cell(x.sha256, 'val'), nodeCell(removeSourceButton(x))] }))),
+    h('p', { class: 'small muted' }, SOURCE_HINT))
     : empty('No sources yet.');
 }
 
@@ -1131,27 +908,12 @@ async function viewAdvisory(id) {
 }
 
 /* ---------- shell and routing ---------- */
-// every address maps to a stage of the cycle (the older addresses still work) and the view that shows it
-const ROUTES = {
-  '': ['home', viewHome], home: ['home', viewHome], overview: ['home', viewHome],
-  plan: ['plan', viewPlan],
-  collect: ['collect', viewCollect], sources: ['collect', viewCollect], feeds: ['collect', viewCollect],
-  process: ['process', viewProcess], indicators: ['process', viewIndicatorsStage],
-  analyse: ['analyse', viewAnalyse], cases: ['analyse', viewAnalyse], case: ['analyse', viewCaseStage], graph: ['analyse', viewGraphStage],
-  share: ['share', viewShareReport], report: ['share', viewShareReport], advisories: ['share', viewShareAdvisories], advisory: ['share', viewShareAdvisory],
-  feedback: ['feedback', viewFeedback],
-};
-const TITLES = { home: 'Home', plan: '1. Plan', collect: '2. Collect', process: '3. Process', analyse: '4. Analyse', share: '5. Share', feedback: '6. Feedback' };
-const SLOW = new Set(['analyse', 'cases', 'case', 'graph', 'indicators', 'share', 'report', 'advisories', 'advisory', 'feedback']); // these need the analysis
-
+const NAV = [['overview', 'Overview'], ['cases', 'Cases'], ['indicators', 'Indicators'], ['graph', 'Link graph'], ['sources', 'Sources'], ['report', 'Report'], ['advisories', 'Advisories']];
 function shell() {
   const app = $('#app');
   app.replaceChildren(h('div', { class: 'shell' },
-    h('nav', { class: 'side', 'aria-label': 'The intelligence cycle' }, h('div', { class: 'brand' }, 'ThreatWeaver', h('small', {}, 'local analyst assistant')),
-      h('div', { class: 'nav' },
-        h('a', { href: '#/', 'data-k': 'home' }, h('span', { class: 'num' }, '⌂'), h('span', { class: 'lbl' }, 'Home')),
-        h('div', { class: 'navhead' }, 'The cycle, in order'),
-        STAGES.map((st) => h('a', { href: st.href, 'data-k': st.key }, h('span', { class: 'num' }, String(st.n)), h('span', { class: 'lbl' }, st.name), h('span', { class: 'dot waiting', 'aria-hidden': 'true' })))),
+    h('nav', { class: 'side', 'aria-label': 'Main' }, h('div', { class: 'brand' }, 'ThreatWeaver', h('small', {}, 'local analyst assistant')),
+      h('div', { class: 'nav' }, NAV.map(([k, label]) => h('a', { href: '#/' + k, 'data-k': k }, label))),
       h('div', { class: 'foot' }, 'Everything runs on this computer. Nothing is blocked, sent or published automatically.')),
     h('main', { class: 'main' },
       h('div', { class: 'topbar' }, h('h1', { id: 'title' }, ''), h('div', { class: 'toolbar' },
@@ -1162,25 +924,23 @@ function shell() {
       h('div', { id: 'view' }))),
     h('div', { class: 'toasts', 'aria-live': 'polite' }));
 }
+const TITLES = { overview: 'Overview', cases: 'Cases', case: 'Case', indicators: 'Indicators', graph: 'Link graph', sources: 'Sources', report: 'Report', advisories: 'Advisories', advisory: 'Advisory' };
 let routeSeq = 0;
 async function route() {
   closeDrawer();
   document.body.classList.remove('graph-open');
-  const [, key = '', arg] = location.hash.split('/');
-  const [stage, view] = ROUTES[key] || ROUTES[''];
-  document.querySelectorAll('.nav a').forEach((a) => (a.dataset.k === stage ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current')));
-  $('#title').textContent = TITLES[stage];
-  const box = $('#view'), seq = ++routeSeq;
-  box.replaceChildren(h('p', { class: 'muted' }, SLOW.has(key) ? 'Loading... After adding a large file, the first view can take up to a minute while everything is analysed.' : 'Loading...'));
+  const [, key = 'overview', arg] = location.hash.split('/');
+  const top = { case: 'cases', advisory: 'advisories' }[key] || key;
+  document.querySelectorAll('.nav a').forEach((a) => (a.dataset.k === top ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current')));
+  $('#title').textContent = TITLES[key] || 'Overview';
+  const view = $('#view'), seq = ++routeSeq;
+  view.replaceChildren(h('p', { class: 'muted' }, 'Loading... After adding a large file, the first view can take up to a minute while everything is analysed.'));
   try {
-    const node = await view(arg);
-    if (seq === routeSeq) {
-      box.replaceChildren(node);
-      // the stages that do not fetch the status themselves keep the step markers in the menu current
-      if (SLOW.has(key)) api('/api/status').then((s) => { statusCache = s; paintNav(); }).catch(() => {});
-    }
+    const views = { overview: viewOverview, cases: viewCases, case: () => viewCase(arg), indicators: viewIndicators, graph: viewGraph, sources: viewSources, report: viewReport, advisories: viewAdvisories, advisory: () => viewAdvisory(arg) };
+    const node = await (views[key] || viewOverview)();
+    if (seq === routeSeq) view.replaceChildren(node);
   } catch (e) {
-    if (seq === routeSeq) box.replaceChildren(h('div', { class: 'banner bad' }, 'Could not load this page: ' + e.message));
+    if (seq === routeSeq) view.replaceChildren(h('div', { class: 'banner bad' }, 'Could not load this page: ' + e.message));
   }
 }
 window.addEventListener('hashchange', route);

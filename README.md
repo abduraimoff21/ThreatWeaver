@@ -13,7 +13,6 @@ ThreatWeaver is a research prototype. It reads logs and reports, finds IPs, doma
 
 ## Contents
 
-- [The intelligence cycle](#the-intelligence-cycle)
 - [What it does](#what-it-does)
 - [How it works](#how-it-works)
 - [Installation](#installation)
@@ -30,21 +29,6 @@ ThreatWeaver is a research prototype. It reads logs and reports, finds IPs, doma
 
 ---
 
-## The intelligence cycle
-
-ThreatWeaver is organised the way threat-intelligence work is: as a cycle of six stages. The dashboard shows them in this order, each one says in plain words what it is for, what *you* do and what *ThreatWeaver* does, and the home page always points at the one thing to do next.
-
-| # | Stage | The question it answers | In ThreatWeaver |
-|:-:|-------|-------------------------|-----------------|
-| 1 | **Plan** (direction) | What do we need to know, for whom, and how far may it be shared? | Write one question, the audience and a sharing level (Traffic Light Protocol). They are printed at the top of the report. |
-| 2 | **Collect** | What raw material do we have? | Drop in logs and reports (or paste text); optionally download the two public feeds. Every file is kept with its SHA-256. |
-| 3 | **Process** | What facts are in it? | Automatic: extract indicators, write each one in a standard form, count repeats once while keeping every sighting. |
-| 4 | **Analyse** | What is connected, and what matters most? | Cases, links, feed matches and a suggested level from named rules. A link graph for the big picture. |
-| 5 | **Share** (dissemination) | What can we tell others? | A traceable, defanged report; advisories that a different person must approve. Nothing is sent anywhere. |
-| 6 | **Feedback** | Was that right? What should change? | Mark indicators *real threat*, *false alarm*, *keep watching* or *expected*. See how each suggested level held up, then go round again from stage 1. |
-
-Feedback never changes a score by itself: ratings stay the sum of named rules, so a person decides whether a rule needs changing. What it does do is show where to look (for example, "most of what was rated medium turned out to be a false alarm"), appear in the report, and keep indicators judged a *false alarm* or *expected* out of new advisory drafts.
-
 ## What it does
 
 | Step | You get |
@@ -54,7 +38,6 @@ Feedback never changes a score by itself: ratings stay the sum of named rules, s
 | **Enrich** | Matches against two public feeds: [Feodo Tracker](https://feodotracker.abuse.ch/) (botnet C2 IPs) and [URLhaus](https://urlhaus.abuse.ch/) (malware URLs). |
 | **Correlate** | Five transparent rules link related indicators into cases. Each link names its rule and cites its evidence. |
 | **Triage** | Eleven readable rules produce a suggested level (high / medium / low / info) with the reasons and evidence behind it. |
-| **Plan and feedback** | The first and last stages of the cycle: the question a report answers, and analyst verdicts on indicators that show how the ratings held up. |
 | **Report** | Markdown and JSON investigation reports, defanged and fully traceable, with a built-in verifier. |
 | **Test detection rules** | A harness that checks Sigma and YARA rules against labeled positive and negative samples. |
 | **Publish advisories safely** | A review workflow with a confidentiality check, a separate reviewer and a typed approval, writing only local files. |
@@ -62,8 +45,6 @@ Feedback never changes a score by itself: ratings stay the sum of named rules, s
 ## How it works
 
 ```
-  PLAN  question + audience + sharing level (TLP)
-        |
  logs / reports / emails          Feodo Tracker        URLhaus
         |                              |                  |
         v                              +--------+---------+
@@ -77,8 +58,6 @@ Feedback never changes a score by itself: ratings stay the sum of named rules, s
                                           |
                   G  Sigma / YARA tests   v
                                   H  advisory draft -> human review -> local files
-                                          |
-  FEEDBACK  analyst verdicts -> accuracy by level, report, advisory drafts --> back to PLAN
 ```
 
 Design principles:
@@ -87,7 +66,6 @@ Design principles:
 2. **No black boxes.** Correlation and triage are small named rules. There is no model and no hidden score.
 3. **Suggest, never act.** Output is for an analyst. The package contains no blocking, quarantine or messaging code, and a test enforces it.
 4. **Offline by default.** The only network call is `feeds fetch`, which you run yourself.
-5. **Simple to follow.** The dashboard walks the six stages in order, in plain words, with one obvious next step.
 
 ## Installation
 
@@ -149,29 +127,28 @@ python -m threatweaver ui --db case.db
 
 It prints a link like `http://127.0.0.1:8765/?token=...` and opens your browser. Open that exact link (it contains the access token). Press Ctrl+C in the terminal to stop it.
 
-| Step | What you can do |
+| Page | What you can do |
 |------|-----------------|
-| **Home** | Where you are in the cycle, the one thing to do next, and a card for each stage with its current status. |
-| **1 Plan** | Write the question this work answers, who it is for, and how far it may be shared (TLP). Example questions are one click away. Every save is a new version; the history is kept. |
-| **2 Collect** | **Drag and drop log files** (or paste text) to add them, **download the public feeds** with one click, and see everything collected with its SHA-256. Each earlier upload has a **Remove** button. |
-| **3 Process** | *Summary:* how many sightings were found and how many distinct indicators they became, by kind. *Indicators:* search and filter by value, type, level or source; click a row for the full explanation. |
-| **4 Analyse** | *Priorities:* counts by level and the cases, highest priority first (quiet single-indicator cases are hidden unless you ask). *Link graph:* an interactive picture of what is connected. **Scroll or pinch to zoom, drag the background to pan**, drag a node to move it, hover one to light up only what it connects to, and use *Find* and *Full screen*. Shape shows the type, colour shows the level, line style shows why two things are linked, and a faint circle groups a case (click its caption to open it). Filters choose the priority to start from, how many indicators to draw, which link types to show and how many links to draw per indicator. |
-| **5 Share** | *Report:* the traceability check, the preview (with your question and sharing level at the top), and downloads (Markdown and JSON). *Advisories:* draft from public evidence, run the confidentiality check, submit, review, approve and write the file, with the audit log. |
-| **6 Feedback** | Mark indicators *real threat*, *false alarm*, *keep watching* or *expected* (from the list of what is worth reviewing next, or from any indicator's panel). See how each suggested level held up, and go round again. |
+| **Overview** | Counts, a priority chart, **drag and drop log files** (or paste text) to add them, **download feeds** with one click, and see your sources, each with a **Remove** button. |
+| **Cases** | Groups of connected indicators, highest priority first. Quiet single-indicator cases are hidden unless you ask. |
+| **Indicators** | Search and filter by value, type, level or source. Click a row for the full explanation. |
+| **Link graph** | An interactive picture of what is connected. **Scroll or pinch to zoom, drag the background to pan**, drag a node to move it, hover one to light up only what it connects to, and use *Find* and *Full screen*. Shape shows the type, colour shows the level, line style shows why two things are linked, and a faint circle groups a case (click its caption to open it). Filters choose the priority to start from, how many indicators to draw, which link types to show and how many links to draw per indicator. Click a node for details. |
+| **Report** | The traceability check, the report preview, and downloads (Markdown and JSON). |
+| **Advisories** | Draft from public evidence, run the confidentiality check, submit, review, approve and write the file, with the audit log. |
+| **Sources** | Every file and feed snapshot with its SHA-256, and a **Remove** button for each upload. |
 
-Clicking any indicator opens a panel with the suggested level, **each rule that fired with its points and reason**, the feed record, connected indicators, **the actual log lines where it appeared**, and a box to record your verdict. Indicators are shown defanged; tick "Show exact values" for the originals.
+Clicking any indicator opens a panel with the suggested level, **each rule that fired with its points and reason**, the feed record, connected indicators, and **the actual log lines where it appeared**. Indicators are shown defanged; tick "Show exact values" for the originals.
 
 Notes:
 
 - **URLhaus key:** the Download button for URLhaus is disabled until `URLHAUS_AUTH_KEY` is set in the terminal that starts the dashboard. The key is never shown in the browser or stored by ThreatWeaver. **An environment variable lives only in the terminal where you set it**: a new terminal, or a restart from another one, starts without it, and the page then says the key is not set. Set it again in the terminal you start the dashboard from (the page shows the PowerShell steps, with the key typed hidden), or save it once for your Windows account with `setx URLHAUS_AUTH_KEY "your-key"` and open a new terminal (it is then kept as plain text in your user settings, so do not paste it into chats or tickets).
-- **Removing an upload:** on step 2 (Collect), every file or pasted text you added has a **Remove** button. After you confirm, it deletes everything extracted from that source (all its sightings, and every indicator seen nowhere else) in the background with a progress bar. Indicators that another upload, a feed record or one of your verdicts still refers to are kept. Cases, the graph, the process counts and reports update. The original file is not touched and can be added again. It needs the same exclusive access as an upload (other writes wait), and refuses feed snapshots. Removal is permanent, so the page asks first and the server refuses a request that does not say it was confirmed. Speed: about 840,000 sightings in 6 seconds on a test copy; a source with millions takes minutes. The database file does not get smaller by itself: the space is reused by later uploads, and `python -c "import sqlite3; sqlite3.connect('case.db').execute('VACUUM')"` (with the dashboard stopped, and free disk space about the size of the database) shrinks it. If the dashboard is closed in the middle of a removal, the source is still listed: remove it again to finish.
+- **Removing an upload:** on the Overview and Sources pages, every file or pasted text you added has a **Remove** button. After you confirm, it deletes everything extracted from that source (all its sightings, and every indicator seen nowhere else) in the background with a progress bar. Indicators that another upload or a feed record still refers to are kept. Cases, the graph, the counts and reports update. The original file is not touched and can be added again. It needs the same exclusive access as an upload (other writes wait), and refuses feed snapshots. Removal is permanent, so the page asks first and the server refuses a request that does not say it was confirmed. Speed: about 840,000 sightings in 6 seconds on a test copy; a source with millions takes minutes. The database file does not get smaller by itself: the space is reused by later uploads, and `python -c "import sqlite3; sqlite3.connect('case.db').execute('VACUUM')"` (with the dashboard stopped, and free disk space about the size of the database) shrinks it. If the dashboard is closed in the middle of a removal, the source is still listed: remove it again to finish.
 - **Feeds:** the Download / Update buttons ask for confirmation first, because they are the only thing that contacts the internet.
 - **Port:** the default is 8765. If it is busy, the next free port is used (check the printed link). `--port` chooses one, `--no-browser` only prints the link, `--out` sets where approved advisories are written (default `out/advisories`).
 - **Log lines:** the dashboard shows the log line around each sighting. Databases made by an older version are upgraded automatically, but their old sightings have no stored line until you re-ingest the file.
 - **Big files (up to 1 GB each):** the browser streams the file to a temporary file on disk (it is never loaded into the page), then it is processed in the background with a progress bar and an estimate. You can keep browsing the data you already have. A file is added all at once, so its results appear only when it has finished. While one is processing, actions that write (feed downloads, advisory steps, pasted text) wait with a clear message. You need roughly three times the file size in free disk space (the temporary copy plus the growing database). Measured on one real SSH log repeated to 0.96 GiB: 4 s to upload, about 16 minutes to process, the server stayed under 80 MB of memory. Closing the dashboard while a file is processing discards that file's work (nothing partial is kept): upload it again.
 - **Pasted text** is limited to 20 MB; use a file for anything bigger.
-- **Very large result sets:** the Priorities tab shows 200 cases at a time and hides quiet single-indicator cases until you ask; use the Indicators tab to search everything.
-- **Early steps load instantly:** Home, Plan, Collect and the Process summary never start the analysis, so they open at once even on a very large database. Steps 4 to 6 need the analysis; the first one after adding a big file can take a while.
+- **Very large result sets:** the Cases page shows 200 cases at a time and hides quiet single-indicator cases until you ask; use Indicators to search everything.
 
 How the dashboard protects you (it handles text that attackers may have influenced, and your browser may have other pages open):
 
@@ -303,7 +280,7 @@ Levels: **high** at 50 or more, **medium** at 25, **low** at 10, otherwise **inf
 
 ### Database tables
 
-`sources` (every ingested file or feed snapshot, pinned by SHA-256) · `iocs` (unique type + value) · `observations` (each sighting with source, line, offsets, original text) · `intel` (feed records with the raw record) · `relations` (URL to host, e-mail address to domain; removed together with their source) · `plan` (the questions, one row per version) · `feedback` (analyst verdicts, append-only) · `links` (correlation cache) · `advisories` and `advisory_events`.
+`sources` (every ingested file or feed snapshot, pinned by SHA-256) · `iocs` (unique type + value) · `observations` (each sighting with source, line, offsets, original text) · `intel` (feed records with the raw record) · `relations` (URL to host, e-mail address to domain; removed together with their source) · `links` (correlation cache) · `advisories` and `advisory_events`.
 
 ### Configuration
 
@@ -326,7 +303,7 @@ Levels: **high** at 50 or more, **medium** at 25, **low** at 10, otherwise **inf
 ## Testing and measured results
 
 ```bash
-python -m pytest                 # 471 tests (470 pass; 1 needs yara-python and is skipped without it)
+python -m pytest                 # 438 tests (437 pass; 1 needs yara-python and is skipped without it)
 python -m threatweaver evaluate  # extraction precision / recall
 python -m threatweaver evaluate --scenario
 ```
@@ -376,7 +353,6 @@ What the numbers cannot tell you is how it behaves on your logs. Run it on a cas
 - Thresholds and points are judgement calls, not calibrated values.
 
 **Dashboard**
-- Feedback is advisory: it does not change a score, and the only automatic effect is that indicators judged a *false alarm* or *expected* are left out of new advisory drafts. The accuracy table needs a few reviews per level before it means anything (it says "mostly false alarms" only from 3 reviews).
 - Memory in the analysis step grows with the number of **distinct** indicators (about 3 KB each: 800,000 distinct indicators used about 2.5 GB). Logs with many millions of distinct IPs or domains will not fit on a small machine.
 - One large file is processed at a time (others queue). There is no cancel button, and a processing file is lost if the dashboard is closed.
 - At very large sizes the first view after a file finishes can take up to a minute while the data is analysed (43 s at 7.76 million sightings; 54 s at 800,000 indicators).
@@ -403,7 +379,6 @@ src/threatweaver/
   correlate.py           D  correlation rules and cases
   triage.py              E  rule-based triage
   report.py              F  JSON / Markdown reports and traceability verifier
-  lifecycle.py           the cycle: plan, feedback, and where each stage stands
   rules.py               G  Sigma / YARA test harness
   advisory.py            H  advisory workflow
   web/                   local dashboard: api.py (data), server.py (security + HTTP), static/ (page)

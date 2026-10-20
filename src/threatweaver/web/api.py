@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import advisory, lifecycle, store
+from .. import advisory, store
 from ..correlate import RULES
 from ..defang import defang
 from ..extract import extract
@@ -56,7 +56,6 @@ class Context:
     env: dict[str, str] | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
     _cache: tuple[tuple, Any] | None = None
-    _process_cache: tuple[tuple, dict[str, Any]] | None = None
     _jobs: JobManager | None = None
 
     def connect(self) -> sqlite3.Connection:
@@ -223,7 +222,7 @@ def cases(ctx: Context, query: dict[str, str] | None = None) -> dict[str, Any]:
                 "indicators": [_row(i, case["case_id"]) for i in case["indicators"][:6]],
             } for case in page],
             "total": len(chosen), "all_cases": len(everything), "quiet_cases": quiet_total,
-            "offset": offset, "limit": limit, "summary": a.report["summary"],
+            "offset": offset, "limit": limit,
         }
     finally:
         conn.close()
@@ -274,12 +273,10 @@ def indicators(ctx: Context, query: dict[str, str]) -> dict[str, Any]:
         limit = _int(query.get("limit"), 50, 1, PAGE_SIZE_MAX)
         offset = _int(query.get("offset"), 0, 0, 10**9)
         rows = []
-        judged = lifecycle.latest_verdicts(conn)
         for ind in matches[offset:offset + limit]:  # rows are built for the visible page only
             row = _row(ind, a.case_of[ind["id"]])
             row.update(sightings=ind["sightings_total"], sources=ind["sources"],
-                       feed_matches=ind["feed_matches_total"], rules=[r["rule"] for r in ind["rules"]],
-                       verdict=judged[ind["id"]]["label"] if ind["id"] in judged else None)
+                       feed_matches=ind["feed_matches_total"], rules=[r["rule"] for r in ind["rules"]])
             rows.append(row)
         return {"total": len(matches), "offset": offset, "limit": limit, "rows": rows}
     finally:
@@ -324,7 +321,6 @@ def indicator_detail(ctx: Context, ioc_id: int) -> dict[str, Any]:
             rules=[{"rule": r["rule"], "points": r["points"], "reason": _defang_ioc_text(r["reason"]),
                     "description": RULE_DESCRIPTIONS.get(r["rule"], ""), "evidence_total": r["evidence_total"]} for r in ind["rules"]],
             sightings=sightings, sightings_total=total, feed_matches=matches, links=links, links_total=len(mine),
-            feedback=lifecycle.history(conn, ioc_id),
         )
         return row
     finally:
@@ -476,145 +472,6 @@ def sources(ctx: Context) -> dict[str, Any]:
     return {"sources": overview(ctx)["sources"]}
 
 
-# ------------------------------------------------------------------ the intelligence cycle
-FEEDBACK_ITEMS = 100  # reviewed indicators listed on the Feedback page
-REPORT_FEEDBACK_ITEMS = 200  # ... and in the report
-REVIEW_QUEUE = 10
-
-
-def _cached_analysis_summary(ctx: Context, conn: sqlite3.Connection) -> dict[str, Any] | None:
-    """The summary of an analysis that is already in memory and still current; never starts a new one."""
-    row = conn.execute(
-        "SELECT (SELECT COALESCE(MAX(id), 0) FROM observations), (SELECT COALESCE(MAX(id), 0) FROM intel), "
-        "(SELECT COUNT(*) FROM sources), (SELECT COALESCE(MAX(id), 0) FROM relations)").fetchone()
-    with ctx.lock:
-        if ctx._cache and ctx._cache[0] == tuple(row):
-            return ctx._cache[1].report["summary"]
-    return None
-
-
-def status(ctx: Context) -> dict[str, Any]:
-    """Where each stage of the cycle stands and what to do next. Cheap: it never runs the analysis, so the
-    Plan, Collect and Process pages load at once even when the data is large."""
-    conn = ctx.connect()
-    try:
-        version = lifecycle.data_version(conn)
-        with ctx.lock:
-            cached = ctx._process_cache
-        if cached is None or cached[0] != version:
-            cached = (version, lifecycle.process_counts(conn))
-            with ctx.lock:
-                ctx._process_cache = cached
-        busy = ctx._jobs is not None and ctx._jobs.busy()
-        feed_rows = {}
-        for r in conn.execute("SELECT id, name, ingested_at FROM sources WHERE kind = 'feed' ORDER BY id"):
-            feed_rows[r["name"]] = r  # the newest snapshot of each feed wins
-        env = ctx.environ()
-        feeds = []
-        for name, spec in FEEDS.items():
-            latest = feed_rows.get(f"feed:{name}")
-            feeds.append({
-                "feed": name, "loaded": latest is not None, "collected_at": latest["ingested_at"] if latest else None,
-                "records": conn.execute("SELECT COUNT(*) FROM intel WHERE source_id = ?", (latest["id"],)).fetchone()[0] if latest else 0,
-                "needs_key": bool(spec.needs_env), "key_set": bool(spec.needs_env and env.get(spec.needs_env)),
-                "key_variable": spec.needs_env, "min_interval_seconds": spec.min_interval_seconds, "terms_url": spec.terms_url,
-            })
-        out = lifecycle.cycle_status(conn, busy=busy, feeds_loaded=sum(1 for f in feeds if f["loaded"]),
-                                     analysis_summary=_cached_analysis_summary(ctx, conn), process=cached[1])
-        out.update(
-            feeds=feeds,
-            sources=[{"id": r["id"], "name": r["name"], "kind": r["kind"], "sha256": r["content_sha256"], "ingested_at": r["ingested_at"]}
-                     for r in conn.execute("SELECT id, name, kind, content_sha256, ingested_at FROM sources WHERE kind != 'feed' ORDER BY id DESC")],
-            examples=list(lifecycle.PLAN_EXAMPLES), markings=lifecycle.MARKINGS, verdicts=lifecycle.VERDICTS,
-            limits={"upload_bytes": MAX_UPLOAD_BYTES, "paste_bytes": MAX_PASTE_BYTES},
-            database=Path(ctx.db_path).name if ctx.db_path != ":memory:" else ":memory:",
-        )
-        return out
-    finally:
-        conn.close()
-
-
-def plan_save(ctx: Context, body: dict[str, Any]) -> dict[str, Any]:
-    ctx.require_idle()
-    with ctx.lock:
-        conn = ctx.connect()
-        try:
-            return {"plan": lifecycle.save_plan(conn, body.get("requirement"), body.get("audience"),
-                                                body.get("marking"), body.get("author"))}
-        except ValueError as exc:
-            raise ApiError(400, str(exc)) from None
-        finally:
-            conn.close()
-
-
-def feedback_add(ctx: Context, body: dict[str, Any]) -> dict[str, Any]:
-    ctx.require_idle()
-    ioc_id = body.get("ioc_id")
-    if not isinstance(ioc_id, int) or isinstance(ioc_id, bool):
-        raise ApiError(400, "ioc_id must be a whole number")
-    with ctx.lock:
-        conn = ctx.connect()
-        try:
-            return {"feedback": lifecycle.add_feedback(conn, ioc_id, body.get("verdict"), body.get("note"), body.get("reviewer"))}
-        except lifecycle.NotFound as exc:
-            raise ApiError(404, str(exc)) from None
-        except ValueError as exc:
-            raise ApiError(400, str(exc)) from None
-        finally:
-            conn.close()
-
-
-def _feedback_item(conn: sqlite3.Connection, a: Analysis, fb: dict[str, Any]) -> dict[str, Any]:
-    ind = a.indicators.get(fb["ioc_id"])
-    if ind is not None:
-        row = _row(ind, a.case_of[fb["ioc_id"]])
-    else:  # reviewed, but no longer a local indicator
-        r = conn.execute("SELECT id, type, value, attrs FROM iocs WHERE id = ?", (fb["ioc_id"],)).fetchone()
-        row = {"id": r["id"], "type": r["type"], "value": r["value"], "display": defang(r["value"]), "level": None, "score": 0, "scope": "", "case_id": None}
-    return {**row, "verdict": fb["verdict"], "label": fb["label"], "note": fb["note"], "reviewer": fb["reviewer"], "at": fb["at"]}
-
-
-def feedback_overview(ctx: Context) -> dict[str, Any]:
-    """Stage 6: what people judged, how the suggested levels held up, and what is worth reviewing next."""
-    conn = ctx.connect()
-    try:
-        a = analysis(ctx, conn)
-        latest = lifecycle.latest_verdicts(conn)
-        newest = sorted(latest.values(), key=lambda f: -f["id"])
-        # worth a look next: indicators nobody has judged yet, strongest first; if the data is all "info", the top few anyway
-        unreviewed = (i for i in a.indicators.values() if i["id"] not in latest)
-        candidates = heapq.nlargest(REVIEW_QUEUE * 5, (i for i in unreviewed if i["level"] != "info"), key=lambda i: (i["score"], -i["id"]))
-        if not candidates:
-            candidates = heapq.nlargest(REVIEW_QUEUE * 5, (i for i in a.indicators.values() if i["id"] not in latest),
-                                        key=lambda i: (i["sightings_total"], -i["id"]))
-        queue = [_row(i, a.case_of[i["id"]]) for i in candidates[:REVIEW_QUEUE]]
-        return {
-            "summary": lifecycle.feedback_counts(conn),
-            "accuracy": lifecycle.accuracy_by_level(latest, {i: a.indicators[i]["level"] for i in latest if i in a.indicators}),
-            "items": [_feedback_item(conn, a, fb) for fb in newest[:FEEDBACK_ITEMS]],
-            "total": len(newest), "queue": queue,
-            "queue_is_quiet": bool(queue) and all(q["level"] == "info" for q in queue),
-        }
-    finally:
-        conn.close()
-
-
-def _report_extras(conn: sqlite3.Connection, a: Analysis) -> dict[str, Any]:
-    """The plan and the feedback, added to a copy of the report (the analysis itself does not depend on them)."""
-    extras: dict[str, Any] = {}
-    plan = lifecycle.current_plan(conn)
-    if plan:
-        extras["plan"] = plan
-    latest = lifecycle.latest_verdicts(conn)
-    if latest:
-        order = {"high": 0, "medium": 1, "low": 2, "info": 3, None: 4}
-        items = [_feedback_item(conn, a, fb) for fb in latest.values()]
-        items.sort(key=lambda x: (order.get(x["level"], 4), -x["score"], x["value"]))
-        extras["feedback"] = {"total": len(items), "items": [
-            {k: x[k] for k in ("type", "value", "level", "label", "verdict", "note", "reviewer", "at")} for x in items[:REPORT_FEEDBACK_ITEMS]]}
-    return extras
-
-
 PREVIEW_LINES = 600
 
 
@@ -623,11 +480,9 @@ def report(ctx: Context) -> dict[str, Any]:
     conn = ctx.connect()
     try:
         a = analysis(ctx, conn)
-        full = {**a.report, **_report_extras(conn, a)}
-        lines = render_markdown(full).split(chr(10))
+        lines = render_markdown(a.report).split(chr(10))
         return {"preview": chr(10).join(lines[:PREVIEW_LINES]), "lines": len(lines), "truncated": len(lines) > PREVIEW_LINES,
-                "summary": a.report["summary"], "traceability": verify_traceability(conn, a.report),
-                "plan": full.get("plan")}
+                "summary": a.report["summary"], "traceability": verify_traceability(conn, a.report)}
     finally:
         conn.close()
 
@@ -636,13 +491,12 @@ def report_download(ctx: Context, fmt: str) -> tuple[bytes, str, str]:
     conn = ctx.connect()
     try:
         a = analysis(ctx, conn)
-        full = {**a.report, **_report_extras(conn, a)}
     finally:
         conn.close()
     if fmt == "md":
-        return render_markdown(full).encode("utf-8"), "text/markdown; charset=utf-8", "threatweaver-report.md"
+        return render_markdown(a.report).encode("utf-8"), "text/markdown; charset=utf-8", "threatweaver-report.md"
     if fmt == "json":
-        return json.dumps(full, indent=2).encode("utf-8"), "application/json; charset=utf-8", "threatweaver-report.json"
+        return json.dumps(a.report, indent=2).encode("utf-8"), "application/json; charset=utf-8", "threatweaver-report.json"
     raise ApiError(404, "unknown report format")
 
 
@@ -798,8 +652,7 @@ def advisory_draft(ctx: Context, body: dict[str, Any]) -> dict[str, Any]:
 
     def go(conn: sqlite3.Connection) -> int:
         a = analysis(ctx, conn)
-        # indicators a person judged to be a false alarm, or expected activity, are not advised on
-        title, text = advisory.draft_from_report(a.report, lifecycle.left_out_of_advisories(conn))
+        title, text = advisory.draft_from_report(a.report)
         return advisory.create_draft(conn, title, text, author)
 
     return _advisory_action(ctx, None, go)

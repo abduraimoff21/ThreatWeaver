@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from threatweaver import lifecycle, store
+from threatweaver import store
 from threatweaver.correlate import correlate, save_links
 from threatweaver.feeds import FEODO, load_feed
 from threatweaver.pipeline import run
@@ -112,16 +112,6 @@ def test_an_indicator_a_feed_lists_stays_after_its_log_is_removed_and_still_matc
     assert [m.feed for m in correlate(conn).matches] == ["feodotracker"]
 
 
-def test_an_analysts_verdict_keeps_its_indicator_so_the_verdict_is_not_lost(conn):
-    store.ingest_text(conn, "hit 198.51.100.7\n", "a.log")
-    ioc = conn.execute("SELECT id FROM iocs").fetchone()["id"]
-    lifecycle.add_feedback(conn, ioc, "confirmed", "seen beaconing", "dana")
-    store.remove_source(conn, sources(conn)["a.log"])
-    assert values(conn) == {"ipv4 198.51.100.7"}
-    assert lifecycle.latest_verdicts(conn)[ioc]["verdict"] == "confirmed"
-    integrity(conn)
-
-
 # ------------------------------------------------------------------ everything downstream agrees
 def test_cases_triage_and_reports_stop_mentioning_what_was_removed(conn):
     store.ingest_text(conn, "198.51.100.7 evil.example.com\n", "a.log")
@@ -209,7 +199,7 @@ def test_removing_an_upload_through_the_dashboard_runs_in_the_background_and_upd
     client, ctx = web
     sid = source_id(ctx, "a.log")
     # warm the caches the removal has to invalidate
-    assert client.get("/api/status")[1]["process"]["indicators"] == 4
+    assert client.get("/api/overview")[1]["summary"]["indicators"] == 4
     assert client.get("/api/cases")[1]["all_cases"] == 2
 
     status, out = client.post("/api/sources/remove", {"source_id": sid, "confirmed": True})
@@ -218,9 +208,9 @@ def test_removing_an_upload_through_the_dashboard_runs_in_the_background_and_upd
 
     job = client.get("/api/jobs")[1]["jobs"][0]
     assert job["state"] == "done" and job["kind"] == "remove" and job["result"] == {"name": "a.log", "removed": True, "sightings": 2, "indicators": 2}
-    s = client.get("/api/status")[1]
-    assert [x["name"] for x in s["sources"]] == ["b.log"]
-    assert s["process"]["indicators"] == 2 and s["process"]["sightings"] == 2  # not stale
+    o = client.get("/api/overview")[1]
+    assert [x["name"] for x in o["sources"]] == ["b.log"]
+    assert o["summary"]["indicators"] == 2  # the analysis was redone, not served from the cache
     assert client.get("/api/cases")[1]["all_cases"] == 1  # the analysis was redone
     assert client.post("/api/sources/remove", {"source_id": sid, "confirmed": True})[0] == 404  # already gone
 
@@ -240,7 +230,7 @@ def test_removing_an_upload_through_the_dashboard_runs_in_the_background_and_upd
 def test_a_bad_or_unconfirmed_removal_is_refused_and_removes_nothing(web, body, status):
     client, ctx = web
     assert client.post("/api/sources/remove", body)[0] == status
-    assert len(client.get("/api/status")[1]["sources"]) == 2
+    assert len(client.get("/api/sources")[1]["sources"]) == 2
 
 
 def test_a_feed_snapshot_cannot_be_removed_from_the_dashboard(web):
@@ -260,7 +250,7 @@ def test_the_removal_route_needs_the_token_and_the_right_origin_and_waits_for_ot
     assert client.post("/api/sources/remove", body, token="nope")[0] == 403
     assert client.post("/api/sources/remove", body, headers={"Origin": "http://evil.example"})[0] == 403
     assert client.get("/api/sources/remove")[0] == 404  # not a GET action
-    assert len(client.get("/api/status")[1]["sources"]) == 2
+    assert len(client.get("/api/sources")[1]["sources"]) == 2
 
     class Busy:
         def busy(self):
@@ -270,7 +260,7 @@ def test_the_removal_route_needs_the_token_and_the_right_origin_and_waits_for_ot
     status, err = client.post("/api/sources/remove", body)
     assert status == 409 and "still being processed" in err["error"]
     ctx._jobs = None
-    assert len(client.get("/api/status")[1]["sources"]) == 2
+    assert len(client.get("/api/sources")[1]["sources"]) == 2
 
 
 def test_while_a_removal_runs_other_writes_are_refused_and_afterwards_allowed(web, tmp_path):
@@ -289,13 +279,13 @@ def test_while_a_removal_runs_other_writes_are_refused_and_afterwards_allowed(we
     ctx._jobs = JobManager(ctx.db_path, work_dir=tmp_path / "work", remove=held_open)
     job = ctx._jobs.submit_removal(source_id(ctx, "a.log"), "a.log")
     assert started.wait(10) and job.state == "processing" and ctx._jobs.busy()
-    assert client.post("/api/plan", {"requirement": "What matters?", "marking": "TLP:GREEN", "author": "d"})[0] == 409
+    assert client.post("/api/feeds/fetch", {"feed": "feodotracker"})[0] == 409
     assert client.post("/api/ingest", {"name": "x.txt", "text": "1.2.3.4"})[0] == 409
     assert client.post("/api/sources/remove", {"source_id": source_id(ctx, "b.log"), "confirmed": True})[0] == 409
-    assert client.get("/api/status")[0] == 200  # reading keeps working while it runs
+    assert client.get("/api/sources")[0] == 200  # reading keeps working while it runs
     release.set()
     assert ctx._jobs.wait(30) and job.state == "done"
-    assert client.post("/api/plan", {"requirement": "What matters?", "marking": "TLP:GREEN", "author": "d"})[0] == 200
+    assert client.post("/api/ingest", {"name": "x.txt", "text": "1.2.3.4"})[0] == 200
 
 
 def test_a_failing_removal_is_reported_as_a_failed_job_and_the_worker_carries_on(tmp_path):

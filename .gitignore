@@ -13,3 +13,5 @@ data/public/
 *.db-wal
 *.db-shm
 study/
+*.analysis.gz
+*.analysis.gz.tmp

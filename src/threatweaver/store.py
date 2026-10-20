@@ -7,6 +7,10 @@ deleting duplicates would lose the provenance, so duplicates are collapsed by
 construction and the evidence is kept in `observations`.
 
 Ingesting the same source content twice is a no-op.
+
+`ioc_source_stats` keeps, for every indicator and source, how many times it was seen and how many of those
+were written defanged on their own. It is filled while a file is ingested, so the analysis never has to count
+millions of sightings again; databases made by older versions get it filled in once (`ensure_stats`).
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ import hashlib
 import json
 import sqlite3
 from bisect import bisect_right
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +36,7 @@ CREATE TABLE IF NOT EXISTS sources (
     kind           TEXT NOT NULL,
     content_sha256 TEXT NOT NULL,
     ingested_at    TEXT NOT NULL,
+    stats_done     INTEGER NOT NULL DEFAULT 0,
     UNIQUE (name, content_sha256)
 );
 CREATE TABLE IF NOT EXISTS iocs (
@@ -63,6 +68,17 @@ CREATE TABLE IF NOT EXISTS relations (
     kind      TEXT NOT NULL,
     source_id INTEGER NOT NULL REFERENCES sources(id),
     UNIQUE (parent_id, child_id, kind, source_id)
+);
+CREATE TABLE IF NOT EXISTS ioc_source_stats (
+    ioc_id          INTEGER NOT NULL,
+    source_id       INTEGER NOT NULL,
+    sightings       INTEGER NOT NULL,
+    direct_defanged INTEGER NOT NULL,
+    PRIMARY KEY (ioc_id, source_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS intel (
     id           INTEGER PRIMARY KEY,
@@ -148,6 +164,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "context" not in columns:
         with conn:
             conn.execute("ALTER TABLE observations ADD COLUMN context TEXT")
+    if "stats_done" not in {r["name"] for r in conn.execute("PRAGMA table_info(sources)")}:
+        with conn:  # instant: only the table definition changes. The summary itself is built by ensure_stats.
+            conn.execute("ALTER TABLE sources ADD COLUMN stats_done INTEGER NOT NULL DEFAULT 0")
 
 
 CONTEXT_CHARS = 200
@@ -207,6 +226,7 @@ def _store_chunk(
     totals.candidates += len(candidates)
     obs_ids: dict[int, int] = {}  # id(candidate) -> observation row id (parents are listed before their hosts)
     ioc_ids: dict[int, int] = {}  # id(candidate) -> ioc row id
+    seen: dict[int, list[int]] = {}  # ioc id -> [sightings stored, of which written defanged on their own]
 
     for cand in candidates:
         norm = normalize(cand)
@@ -234,12 +254,22 @@ def _store_chunk(
         if cur.rowcount:
             totals.new_observations += 1
             obs_ids[id(cand)] = cur.lastrowid
+            counts = seen.setdefault(ioc_id, [0, 0])
+            counts[0] += 1
+            counts[1] += 1 if (cand.defanged and parent is None) else 0
         if cand.derived_from is not None and id(cand.derived_from) in ioc_ids:
             kind = "email_domain" if cand.derived_from.type == IocType.EMAIL else "url_host"
             conn.execute(
                 "INSERT OR IGNORE INTO relations (parent_id, child_id, kind, source_id) VALUES (?, ?, ?, ?)",
                 (ioc_ids[id(cand.derived_from)], ioc_id, kind, source_id),
             )
+    if seen:
+        conn.executemany(
+            "INSERT INTO ioc_source_stats (ioc_id, source_id, sightings, direct_defanged) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (ioc_id, source_id) DO UPDATE SET sightings = sightings + excluded.sightings, "
+            "direct_defanged = direct_defanged + excluded.direct_defanged",
+            [(i, source_id, n, d) for i, (n, d) in seen.items()],
+        )
 
 
 def _existing_source(conn: sqlite3.Connection, name: str, digest: str) -> int | None:
@@ -263,7 +293,7 @@ def ingest_text(
         if existing:
             return IngestResult(source_id=existing, already_ingested=True)
         source_id = conn.execute(
-            "INSERT INTO sources (name, kind, content_sha256, ingested_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO sources (name, kind, content_sha256, ingested_at, stats_done) VALUES (?, ?, ?, ?, 1)",
             (source_name, source_kind, digest, observed_at),
         ).lastrowid
         totals = _Totals()
@@ -340,7 +370,7 @@ def ingest_path(
         if existing:
             return IngestResult(source_id=existing, already_ingested=True)
         source_id = conn.execute(
-            "INSERT INTO sources (name, kind, content_sha256, ingested_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO sources (name, kind, content_sha256, ingested_at, stats_done) VALUES (?, ?, ?, ?, 1)",
             (name, source_kind, digest, observed_at),
         ).lastrowid
         totals, cache = _Totals(), {}
@@ -393,6 +423,42 @@ def provenance(conn: sqlite3.Connection, ioc_type: str, value: str) -> list[sqli
     ).fetchall()
 
 
+def ensure_stats(conn: sqlite3.Connection) -> int:
+    """Fill in the per-indicator summary for sources that do not have it yet (databases made by an older
+    version). One pass over that source's sightings, in its own transaction, so it can be repeated if
+    interrupted. Does nothing, and writes nothing, once every source is done. Returns how many it filled in."""
+    todo = [r["id"] for r in conn.execute("SELECT id FROM sources WHERE stats_done = 0 ORDER BY id")]
+    for source_id in todo:
+        with conn:
+            conn.execute("DELETE FROM ioc_source_stats WHERE source_id = ?", (source_id,))
+            conn.execute(
+                "INSERT INTO ioc_source_stats (ioc_id, source_id, sightings, direct_defanged) "
+                "SELECT ioc_id, source_id, COUNT(*), COALESCE(SUM(defanged = 1 AND parent_observation_id IS NULL), 0) "
+                "FROM observations WHERE source_id = ? GROUP BY ioc_id", (source_id,))
+            conn.execute("UPDATE sources SET stats_done = 1 WHERE id = ?", (source_id,))
+    return len(todo)
+
+
+def first_observation_ids(conn: sqlite3.Connection, ioc_ids: Iterable[int], limit: int, direct_defanged_only: bool = False) -> dict[int, list[int]]:
+    """The first `limit` sighting ids of each indicator, oldest first. One short index lookup per indicator,
+    instead of numbering every sighting in the database."""
+    extra = " AND defanged = 1 AND parent_observation_id IS NULL" if direct_defanged_only else ""
+    sql = f"SELECT id FROM observations WHERE ioc_id = ?{extra} ORDER BY id LIMIT ?"
+    return {i: [r[0] for r in conn.execute(sql, (i, limit))] for i in ioc_ids}
+
+
+def bump_epoch(conn: sqlite3.Connection) -> None:
+    """Called when something is deleted: a saved analysis made before this point must not be trusted."""
+    with conn:
+        conn.execute("INSERT INTO meta (key, value) VALUES ('epoch', '1') "
+                     "ON CONFLICT (key) DO UPDATE SET value = CAST(value AS INTEGER) + 1")
+
+
+def epoch(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT value FROM meta WHERE key = 'epoch'").fetchone()
+    return int(row[0]) if row else 0
+
+
 # ------------------------------------------------------------------ removing an upload
 REMOVE_BATCH = 100_000  # sightings deleted per transaction; keeps the write-ahead log small on a huge source
 
@@ -428,6 +494,7 @@ def remove_source(
         raise ValueError("a feed snapshot is not an upload; download the feed again to replace it")
     total = conn.execute("SELECT COUNT(*) FROM observations WHERE source_id = ?", (source_id,)).fetchone()[0]
     done = 0
+    bump_epoch(conn)  # from here until it finishes, a half-removed source must not be taken for the finished one
     # Every sighting of this source goes, children (the host of a URL) and parents together, so the references
     # between them hold once it is finished. SQLite checks them row by row, which would stop a batch that
     # deletes a parent first, so checking is paused on this connection while the batches run.
@@ -452,6 +519,7 @@ def remove_source(
             conn.execute("INSERT OR IGNORE INTO removing_iocs SELECT parent_id FROM relations WHERE source_id = ?", (source_id,))
             conn.execute("INSERT OR IGNORE INTO removing_iocs SELECT child_id FROM relations WHERE source_id = ?", (source_id,))
             relations = conn.execute("DELETE FROM relations WHERE source_id = ?", (source_id,)).rowcount
+            conn.execute("DELETE FROM ioc_source_stats WHERE source_id = ?", (source_id,))
             conn.execute("DELETE FROM links")
             removed = conn.execute(
                 "DELETE FROM iocs WHERE id IN (SELECT ioc_id FROM removing_iocs) "
@@ -461,6 +529,8 @@ def remove_source(
                 "AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.child_id = iocs.id)").rowcount
             conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
             conn.execute("DROP TABLE IF EXISTS temp.removing_iocs")
+            conn.execute("INSERT INTO meta (key, value) VALUES ('epoch', '1') "
+                         "ON CONFLICT (key) DO UPDATE SET value = CAST(value AS INTEGER) + 1")
     finally:
         conn.execute("PRAGMA foreign_keys = ON")
     try:  # give the space in the log back; a reader that is busy just means it happens later

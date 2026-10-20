@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from itertools import combinations, groupby
 from typing import Any
 
+from . import store
+
 RULES: dict[str, tuple[int, str]] = {
     "url_host": (3, "URL and its host name or address"),
     "email_domain": (3, "e-mail address and its domain"),
@@ -118,7 +120,8 @@ def correlate(
     max_family_group: int = MAX_FAMILY_GROUP,
 ) -> CorrelationResult:
     out = CorrelationResult()
-    local = {r[0] for r in conn.execute("SELECT DISTINCT ioc_id FROM observations")}
+    store.ensure_stats(conn)
+    local = {r[0] for r in conn.execute("SELECT DISTINCT ioc_id FROM ioc_source_stats")}
     label = {r["id"]: f"{r['type']} {r['value']}" for r in conn.execute("SELECT id, type, value FROM iocs")}
 
     # --- url_host and email_domain (structural: one was written inside the other) ----------------------

@@ -280,7 +280,7 @@ Levels: **high** at 50 or more, **medium** at 25, **low** at 10, otherwise **inf
 
 ### Database tables
 
-`sources` (every ingested file or feed snapshot, pinned by SHA-256) · `iocs` (unique type + value) · `observations` (each sighting with source, line, offsets, original text) · `intel` (feed records with the raw record) · `relations` (URL to host, e-mail address to domain; removed together with their source) · `links` (correlation cache) · `advisories` and `advisory_events`.
+`sources` (every ingested file or feed snapshot, pinned by SHA-256) · `iocs` (unique type + value) · `observations` (each sighting with source, line, offsets, original text) · `ioc_source_stats` (sightings per indicator and source, kept up to date while ingesting so analysis does not re-read every sighting) · `meta` (a counter that changes on every removal) · `intel` (feed records with the raw record) · `relations` (URL to host, e-mail address to domain; removed together with their source) · `links` (correlation cache) · `advisories` and `advisory_events`.
 
 ### Configuration
 
@@ -303,7 +303,7 @@ Levels: **high** at 50 or more, **medium** at 25, **low** at 10, otherwise **inf
 ## Testing and measured results
 
 ```bash
-python -m pytest                 # 438 tests (437 pass; 1 needs yara-python and is skipped without it)
+python -m pytest                 # 482 tests (481 pass; 1 needs yara-python and is skipped without it)
 python -m threatweaver evaluate  # extraction precision / recall
 python -m threatweaver evaluate --scenario
 ```
@@ -355,7 +355,8 @@ What the numbers cannot tell you is how it behaves on your logs. Run it on a cas
 **Dashboard**
 - Memory in the analysis step grows with the number of **distinct** indicators (about 3 KB each: 800,000 distinct indicators used about 2.5 GB). Logs with many millions of distinct IPs or domains will not fit on a small machine.
 - One large file is processed at a time (others queue). There is no cancel button, and a processing file is lost if the dashboard is closed.
-- At very large sizes the first view after a file finishes can take up to a minute while the data is analysed (43 s at 7.76 million sightings; 54 s at 800,000 indicators).
+- The analysis (correlation, triage, report) is saved beside the database as `<name>.analysis.gz` and loaded again on the next start, so only the first view after new data is slow. The dashboard prepares it in the background when it starts and after an upload or removal finishes. Measured on a synthetic 4.19 million-sighting database: previously 2 to 2.5 minutes for the first view and again after every restart; now about 35 s the first time and about 2 s after a restart. The pass that looks for indicators on the same line still reads every sighting, so the first view after new data grows with log size (roughly 50 s is expected at 14 million sightings; not measured). A database made by an older version gets one extra pass the first time to fill in its per-indicator counts.
+- The saved file is only a cache and is safe to delete (it is git-ignored). It is tied to the exact sources in the database and to the analysis code, so it is rebuilt automatically after an upload, a removal or an upgrade. It is plain compressed JSON; a damaged or unreadable file is ignored and the analysis is recomputed.
 - Single-user and local: one shared token, no accounts. Reviewer and author names are typed by the person using it.
 - The link graph is a **selection**, not everything. A big log has far more links than a screen can show (a test with 150 indicators had 8,086 links between them, which draws as a solid disc), so it starts from the highest-priority indicators, adds what they connect to (at most 500 indicators), and draws each indicator's strongest links (3 by default; the page says how many were left out). Every link is still listed in an indicator's detail panel (strongest 100). The layout is computed once per view (drag nodes to adjust; it does not animate live).
 - A case page lists its 500 highest-scoring indicators; use the Indicators page to search the rest.
@@ -375,6 +376,7 @@ src/threatweaver/
   defang.py extract.py   A  extraction and refanging
   files.py               file-name helpers (extensions, "invoice.pdf.exe")
   normalize.py store.py  B  canonical forms, SQLite, de-duplication, provenance
+  analysis_cache.py      saved analysis (<db>.analysis.gz) and the fingerprint that keeps it honest
   feeds/                 C  Feodo Tracker + URLhaus (parsers, fetcher, loader)
   correlate.py           D  correlation rules and cases
   triage.py              E  rule-based triage

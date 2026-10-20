@@ -352,6 +352,8 @@ def serve(ctx: Context, host: str = "127.0.0.1", port: int = 8765, open_browser:
     print("Your browser should open by itself. If not, copy this whole link (it holds the access token):")
     print(url)
     print("Listening on loopback only. Press Ctrl+C to stop.")
+    ctx.warm_after_jobs = True
+    ctx.warm_in_background()  # load the saved analysis now (or make it), so the first page does not have to
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:

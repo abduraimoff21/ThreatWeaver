@@ -19,7 +19,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from . import __version__
+from . import __version__, store
 from .correlate import CorrelationResult, Evidence, clusters, correlate
 from .defang import defang
 from .triage import LEVELS, RULE_DESCRIPTIONS, Verdict, triage
@@ -75,22 +75,24 @@ def build_report(
     def ioc_ref(i: int) -> dict[str, Any]:
         return {"id": i, "type": iocs[i]["type"], "value": iocs[i]["value"]}
 
-    # Sightings are summarised by SQL: totals, source names, and only the first MAX_SIGHTINGS rows per
-    # indicator are materialised. Memory grows with the number of indicators, not with the log size.
-    sight_total: dict[int, int] = {r["ioc_id"]: r["n"] for r in conn.execute(
-        "SELECT ioc_id, COUNT(*) AS n FROM observations GROUP BY ioc_id")}
+    # Sightings are summarised, never listed in full: the totals and source names come from the summary kept at
+    # upload time, and only the first MAX_SIGHTINGS rows per indicator are read, each by a short index lookup.
+    # Memory and time grow with the number of indicators, not with the size of the log.
+    store.ensure_stats(conn)
+    sight_total: dict[int, int] = {}
     sight_sources: dict[int, list[str]] = {}
-    for r in conn.execute("SELECT DISTINCT ioc_id, source_id FROM observations"):
+    for r in conn.execute("SELECT ioc_id, source_id, sightings FROM ioc_source_stats"):
+        sight_total[r["ioc_id"]] = sight_total.get(r["ioc_id"], 0) + r["sightings"]
         sight_sources.setdefault(r["ioc_id"], []).append(sources[r["source_id"]]["name"])
     sightings: dict[int, list[dict[str, Any]]] = {}
-    for o in conn.execute(
-        "SELECT * FROM (SELECT o.*, ROW_NUMBER() OVER (PARTITION BY ioc_id ORDER BY id) AS rn FROM observations o) "
-        "WHERE rn <= ? ORDER BY ioc_id, id", (MAX_SIGHTINGS,)
-    ):
-        sightings.setdefault(o["ioc_id"], []).append({
+    for ioc_id in sorted(sight_total):
+        rows = conn.execute(
+            "SELECT id, source_id, line_no, raw, defanged, parent_observation_id FROM observations "
+            "WHERE ioc_id = ? ORDER BY id LIMIT ?", (ioc_id, MAX_SIGHTINGS)).fetchall()
+        sightings[ioc_id] = [{
             "observation_id": o["id"], "source": sources[o["source_id"]]["name"], "line": o["line_no"],
             "raw": o["raw"], "defanged": bool(o["defanged"]), "derived_from_url": o["parent_observation_id"] is not None,
-        })
+        } for o in rows]
     intel: dict[int, dict[int, dict[str, Any]]] = {}
     for t in conn.execute("SELECT * FROM intel ORDER BY id"):
         intel.setdefault(t["ioc_id"], {})[t["id"]] = {

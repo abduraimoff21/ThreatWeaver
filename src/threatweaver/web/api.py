@@ -14,12 +14,13 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import advisory, store
+from .. import advisory, analysis_cache, store
 from ..correlate import RULES
 from ..defang import defang
 from ..extract import extract
@@ -55,7 +56,9 @@ class Context:
     fetcher: Callable[..., Any] = fetch_text  # injectable so tests never touch the network
     env: dict[str, str] | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
-    _cache: tuple[tuple, Any] | None = None
+    _cache: tuple[str, Any] | None = None
+    _analysis_lock: threading.Lock = field(default_factory=threading.Lock)  # one analysis at a time; the rest wait for it
+    warm_after_jobs: bool = False  # the dashboard sets this: prepare the analysis in the background when an upload or removal ends
     _jobs: JobManager | None = None
 
     def connect(self) -> sqlite3.Connection:
@@ -64,8 +67,11 @@ class Context:
     def jobs(self) -> JobManager:
         with self.lock:
             if self._jobs is None:
-                self._jobs = JobManager(self.db_path)
+                self._jobs = JobManager(self.db_path, on_idle=self.warm_in_background if self.warm_after_jobs else None)
             return self._jobs
+
+    def warm_in_background(self) -> None:
+        threading.Thread(target=warm, args=(self,), name="threatweaver-analysis", daemon=True).start()
 
     def require_idle(self) -> None:
         """Writes would queue behind (and time out against) a large file being ingested."""
@@ -96,11 +102,14 @@ def safe_line(text: str | None) -> str:
 
 
 class Analysis:
-    """One consistent snapshot: correlation, triage and the report, built from the database."""
+    """One consistent snapshot: correlation, triage and the report, built from the database, or loaded from the
+    copy saved by an earlier run (`parts`) when the database and the code are unchanged."""
 
-    def __init__(self, conn: sqlite3.Connection):
-        pr = run(conn, generated_at=None, persist=False)
-        self.result, self.verdicts, self.report = pr.result, pr.verdicts, pr.report
+    def __init__(self, conn: sqlite3.Connection, parts: tuple[Any, Any, Any] | None = None):
+        if parts is None:
+            pr = run(conn, generated_at=None, persist=False)
+            parts = (pr.result, pr.verdicts, pr.report)
+        self.result, self.verdicts, self.report = analysis_cache.compact(parts[0]), parts[1], parts[2]
         self.indicators: dict[int, dict[str, Any]] = {}
         self.case_of: dict[int, str] = {}
         for case in self.report["cases"]:
@@ -127,20 +136,49 @@ class Analysis:
 
 
 def analysis(ctx: Context, conn: sqlite3.Connection) -> Analysis:
-    # Rows are only ever added, so the newest id says whether anything changed. (Counting 14 million
-    # sightings on every request would make every page wait for it.)
-    row = conn.execute(
-        "SELECT (SELECT COALESCE(MAX(id), 0) FROM observations), "
-        "(SELECT COALESCE(MAX(id), 0) FROM intel), (SELECT COUNT(*) FROM sources), "
-        "(SELECT COALESCE(MAX(id), 0) FROM relations)"
-    ).fetchone()
-    version = tuple(row)
-    with ctx.lock:
-        if ctx._cache and ctx._cache[0] == version:
-            return ctx._cache[1]
-        fresh = Analysis(conn)
-        ctx._cache = (version, fresh)
-        return fresh
+    """The analysis of what is in the database now. In memory if it was already made in this run; else the copy
+    saved on disk if the database and the code are unchanged; else computed (and saved). A second request that
+    arrives while one is being made waits for it instead of starting another."""
+
+    def current() -> Analysis | None:
+        with ctx.lock:
+            return ctx._cache[1] if ctx._cache and ctx._cache[0] == analysis_cache.fingerprint(conn) else None
+
+    hit = current()  # the usual case: nothing to do beyond reading the list of sources
+    if hit is not None:
+        return hit
+    with ctx._analysis_lock:
+        # Filling in the per-indicator summary of an older database writes to it, so it happens here, one at a
+        # time, before the read below (a second caller would otherwise wait on the database lock and time out).
+        store.ensure_stats(conn)
+        conn.execute("BEGIN")  # one snapshot for everything below, so the fingerprint and the analysis describe the same data
+        try:
+            fp = analysis_cache.fingerprint(conn)
+            with ctx.lock:
+                if ctx._cache and ctx._cache[0] == fp:
+                    return ctx._cache[1]
+            path = analysis_cache.path_for(ctx.db_path)
+            parts = analysis_cache.load(path, fp)
+            fresh = Analysis(conn, parts)
+            if parts is None and path is not None and not analysis_cache.save(path, fp, fresh.result, fresh.verdicts, fresh.report):
+                sys.stderr.write(f"[ui] could not save the analysis next to {ctx.db_path}; it will be redone on the next start\n")
+            with ctx.lock:
+                ctx._cache = (fp, fresh)
+            return fresh
+        finally:
+            conn.rollback()
+
+
+def warm(ctx: Context) -> None:
+    """Get the analysis ready before the first page needs it: load the saved copy, or make and save one."""
+    try:
+        conn = ctx.connect()
+        try:
+            analysis(ctx, conn)
+        finally:
+            conn.close()
+    except Exception as exc:  # a page that needs it will report the problem properly
+        sys.stderr.write(f"[ui] preparing the analysis failed: {type(exc).__name__}: {exc}\n")
 
 
 def _row(ind: dict[str, Any], case_id: str | None = None) -> dict[str, Any]:
@@ -163,9 +201,10 @@ def overview(ctx: Context) -> dict[str, Any]:
     try:
         a = analysis(ctx, conn)
         env = ctx.environ()
+        store.ensure_stats(conn)
         sources = [dict(r) for r in conn.execute(
             "SELECT s.id, s.name, s.kind, s.content_sha256 AS sha256, s.ingested_at, "
-            "(SELECT COUNT(DISTINCT ioc_id) FROM observations o WHERE o.source_id = s.id) AS indicators, "
+            "(SELECT COUNT(*) FROM ioc_source_stats o WHERE o.source_id = s.id) AS indicators, "
             "(SELECT COUNT(*) FROM intel t WHERE t.source_id = s.id) AS records "
             "FROM sources s ORDER BY s.id DESC")]
         feeds = []

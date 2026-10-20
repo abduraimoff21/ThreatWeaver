@@ -31,6 +31,7 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 
+from . import store
 from .correlate import CorrelationResult, Evidence, correlate
 from .defang import defang
 
@@ -101,26 +102,17 @@ class _Stats:
 
 
 def _observation_stats(conn: sqlite3.Connection) -> defaultdict:
-    """Everything triage needs to know about sightings, gathered by SQL so memory does not grow with them."""
-    n: dict[int, tuple[int, int]] = {
-        r[0]: (r[1], r[2]) for r in conn.execute(
-            "SELECT ioc_id, COUNT(*), COUNT(DISTINCT source_id) FROM observations GROUP BY ioc_id")}
-    first: dict[int, list[int]] = defaultdict(list)
-    for ioc_id, obs_id in conn.execute(
-        "SELECT ioc_id, id FROM (SELECT ioc_id, id, ROW_NUMBER() OVER (PARTITION BY ioc_id ORDER BY id) AS rn "
-        "FROM observations) WHERE rn <= ? ORDER BY ioc_id, id", (EVIDENCE_SAMPLE,)):
-        first[ioc_id].append(obs_id)
-    dcount: dict[int, int] = {r[0]: r[1] for r in conn.execute(
-        "SELECT ioc_id, COUNT(*) FROM observations WHERE defanged = 1 AND parent_observation_id IS NULL GROUP BY ioc_id")}
-    dfirst: dict[int, list[int]] = defaultdict(list)
-    for ioc_id, obs_id in conn.execute(
-        "SELECT ioc_id, id FROM (SELECT ioc_id, id, ROW_NUMBER() OVER (PARTITION BY ioc_id ORDER BY id) AS rn "
-        "FROM observations WHERE defanged = 1 AND parent_observation_id IS NULL) WHERE rn <= ? ORDER BY ioc_id, id",
-        (EVIDENCE_SAMPLE,)):
-        dfirst[ioc_id].append(obs_id)
+    """Everything triage needs to know about sightings. Totals come from the summary kept at upload time, and the
+    first few sighting ids from one short index lookup per indicator, so nothing here reads every sighting."""
+    store.ensure_stats(conn)
+    n: dict[int, tuple[int, int, int]] = {
+        r[0]: (r[1], r[2], r[3]) for r in conn.execute(
+            "SELECT ioc_id, SUM(sightings), COUNT(*), SUM(direct_defanged) FROM ioc_source_stats GROUP BY ioc_id")}
+    first = store.first_observation_ids(conn, n, EVIDENCE_SAMPLE)
+    dfirst = store.first_observation_ids(conn, [i for i, (_, _, d) in n.items() if d], EVIDENCE_SAMPLE, direct_defanged_only=True)
     stats: defaultdict = defaultdict(_Stats)
-    for ioc_id, (count, sources) in n.items():
-        stats[ioc_id] = _Stats(count, sources, tuple(first[ioc_id]), dcount.get(ioc_id, 0), tuple(dfirst[ioc_id]))
+    for ioc_id, (count, sources, defanged) in n.items():
+        stats[ioc_id] = _Stats(count, sources, tuple(first[ioc_id]), defanged, tuple(dfirst.get(ioc_id, ())))
     return stats
 
 
@@ -128,7 +120,8 @@ def triage(conn: sqlite3.Connection, result: CorrelationResult | None = None) ->
     """Score every local indicator. Deterministic for a given database."""
     result = result or correlate(conn)
     iocs = {r["id"]: r for r in conn.execute("SELECT id, type, value, attrs FROM iocs")}
-    local = [r["ioc_id"] for r in conn.execute("SELECT DISTINCT ioc_id FROM observations ORDER BY ioc_id")]
+    store.ensure_stats(conn)
+    local = [r["ioc_id"] for r in conn.execute("SELECT DISTINCT ioc_id FROM ioc_source_stats ORDER BY ioc_id")]
 
     stats = _observation_stats(conn)  # per-indicator counts and the first few ids: O(indicators), not O(sightings)
     matches = defaultdict(list)

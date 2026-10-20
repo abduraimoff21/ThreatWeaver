@@ -56,12 +56,14 @@ class Job:
 
 class JobManager:
     def __init__(self, db_path: str, work_dir: str | Path | None = None,
-                 ingest: Callable[..., Any] = store.ingest_path, remove: Callable[..., Any] = store.remove_source):
+                 ingest: Callable[..., Any] = store.ingest_path, remove: Callable[..., Any] = store.remove_source,
+                 on_idle: Callable[[], None] | None = None):
         self.db_path = db_path
         self.work_dir = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="threatweaver-uploads-"))
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self._ingest = ingest
         self._remove = remove
+        self._on_idle = on_idle  # called when a job ends and nothing else is waiting (the dashboard prepares its analysis then)
         self._jobs: dict[str, Job] = {}
         self._order: list[str] = []
         self._queue: queue.Queue[str | None] = queue.Queue()
@@ -154,6 +156,11 @@ class JobManager:
                     try:
                         job.path.unlink()
                     except OSError:
+                        pass
+                if self._on_idle is not None and self._queue.empty() and job.state == "done":
+                    try:
+                        self._on_idle()
+                    except Exception:  # preparing ahead is a courtesy; it must never break the worker
                         pass
 
     def close(self) -> None:

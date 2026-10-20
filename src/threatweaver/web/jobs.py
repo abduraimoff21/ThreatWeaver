@@ -1,4 +1,4 @@
-"""Background ingest jobs for the dashboard.
+"""Background jobs for the dashboard: ingesting a file, and removing one that was uploaded before.
 
 Large files are streamed to a temporary file on disk by the HTTP handler (no memory spike), then
 processed here, one at a time, in a worker thread. Each job reports progress (bytes processed of
@@ -31,7 +31,9 @@ class Job:
     id: str
     name: str
     size: int
-    path: Path
+    path: Path | None
+    kind: str = "ingest"  # ingest | remove
+    source_id: int | None = None  # the source a "remove" job deletes
     state: str = "queued"  # queued | processing | done | error
     bytes_done: int = 0
     result: dict[str, Any] | None = None
@@ -47,18 +49,19 @@ class Job:
         eta = None
         if self.state == "processing" and self.bytes_done > 0 and elapsed > 2:
             eta = max(0.0, elapsed * (self.size - self.bytes_done) / self.bytes_done)
-        return {"id": self.id, "name": self.name, "size": self.size, "state": self.state,
+        return {"id": self.id, "name": self.name, "kind": self.kind, "size": self.size, "state": self.state,
                 "bytes_done": self.bytes_done, "percent": round(pct, 1), "elapsed": round(elapsed, 1),
                 "eta_seconds": None if eta is None else round(eta), "result": self.result, "error": self.error}
 
 
 class JobManager:
     def __init__(self, db_path: str, work_dir: str | Path | None = None,
-                 ingest: Callable[..., Any] = store.ingest_path):
+                 ingest: Callable[..., Any] = store.ingest_path, remove: Callable[..., Any] = store.remove_source):
         self.db_path = db_path
         self.work_dir = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="threatweaver-uploads-"))
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self._ingest = ingest
+        self._remove = remove
         self._jobs: dict[str, Job] = {}
         self._order: list[str] = []
         self._queue: queue.Queue[str | None] = queue.Queue()
@@ -70,7 +73,14 @@ class JobManager:
         return self.work_dir / f"{uuid.uuid4().hex}.upload"
 
     def submit(self, name: str, path: Path, size: int) -> Job:
-        job = Job(uuid.uuid4().hex[:12], name, size, path, created=time.time())
+        return self._enqueue(Job(uuid.uuid4().hex[:12], name, size, path, created=time.time()))
+
+    def submit_removal(self, source_id: int, name: str) -> Job:
+        """Queue the deletion of an uploaded source. It runs on the same worker as ingests, one at a time, and while
+        it is queued or running the dashboard refuses other writes. The size is the number of sightings, known once it starts."""
+        return self._enqueue(Job(uuid.uuid4().hex[:12], name, 0, None, kind="remove", source_id=source_id, created=time.time()))
+
+    def _enqueue(self, job: Job) -> Job:
         with self._lock:
             self._jobs[job.id] = job
             self._order.append(job.id)
@@ -122,11 +132,15 @@ class JobManager:
                 conn = store.connect(self.db_path)
 
                 def progress(done: int, total: int, job: Job = job) -> None:
-                    job.bytes_done = done
+                    job.size, job.bytes_done = total, done
 
-                res = self._ingest(conn, job.path, source_name=job.name, progress=progress)
-                job.result = {"name": job.name, "already_ingested": res.already_ingested, "candidates": res.candidates,
-                              "new_indicators": res.new_iocs, "sightings": res.new_observations, "rejected": res.rejected}
+                if job.kind == "remove":
+                    gone = self._remove(conn, job.source_id, progress=progress)
+                    job.result = {"name": job.name, "removed": True, "sightings": gone.sightings, "indicators": gone.indicators}
+                else:
+                    res = self._ingest(conn, job.path, source_name=job.name, progress=progress)
+                    job.result = {"name": job.name, "already_ingested": res.already_ingested, "candidates": res.candidates,
+                                  "new_indicators": res.new_iocs, "sightings": res.new_observations, "rejected": res.rejected}
                 job.bytes_done = job.size
                 job.state = "done"
             except Exception as exc:  # the page shows the reason; details go to the terminal
@@ -136,10 +150,11 @@ class JobManager:
                 job.finished = time.time()
                 if conn is not None:
                     conn.close()
-                try:
-                    job.path.unlink()
-                except OSError:
-                    pass
+                if job.path is not None:
+                    try:
+                        job.path.unlink()
+                    except OSError:
+                        pass
 
     def close(self) -> None:
         self._queue.put(None)

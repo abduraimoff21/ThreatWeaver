@@ -7,7 +7,9 @@ strong enough to group indicators into a case.
 
 Rules
   url_host       a URL and its host (structural, weight 3)
-  same_line      two different indicators on the same line of the same source,
+  email_domain   an e-mail address and its domain (structural, weight 3). Not made for public
+                 mailbox providers such as gmail.com: they are not recorded as domains at all
+  same_line     two different indicators on the same line of the same source,
                  not overlapping each other (weight 2). Lines with many
                  indicators are skipped as too noisy to mean anything.
   hostname_ip    a host name that spells out an IPv4 address (192-0-2-7.isp.example.net,
@@ -36,6 +38,7 @@ from typing import Any
 
 RULES: dict[str, tuple[int, str]] = {
     "url_host": (3, "URL and its host name or address"),
+    "email_domain": (3, "e-mail address and its domain"),
     "same_line": (2, "different indicators on the same line of the same source"),
     "hostname_ip": (2, "host name spells out an IPv4 address that was also observed"),
     "shared_family": (1, "both indicators are listed by a feed under the same malware family"),
@@ -118,19 +121,21 @@ def correlate(
     local = {r[0] for r in conn.execute("SELECT DISTINCT ioc_id FROM observations")}
     label = {r["id"]: f"{r['type']} {r['value']}" for r in conn.execute("SELECT id, type, value FROM iocs")}
 
-    # --- url_host --------------------------------------------------------
-    host_pairs: dict[tuple[int, int], list[int]] = defaultdict(list)
+    # --- url_host and email_domain (structural: one was written inside the other) ----------------------
+    by_kind: dict[str, dict[tuple[int, int], list[int]]] = {"url_host": defaultdict(list), "email_domain": defaultdict(list)}
     for r in conn.execute(
-        "SELECT r.id, r.parent_id, r.child_id FROM relations r JOIN sources s ON s.id = r.source_id "
-        "WHERE r.kind = 'url_host' AND s.kind != 'feed' ORDER BY r.id"
+        "SELECT r.id, r.parent_id, r.child_id, r.kind FROM relations r JOIN sources s ON s.id = r.source_id "
+        "WHERE r.kind IN ('url_host', 'email_domain') AND s.kind != 'feed' ORDER BY r.id"
     ):
         if r["parent_id"] in local and r["child_id"] in local and r["parent_id"] != r["child_id"]:
-            host_pairs[_pair(r["parent_id"], r["child_id"])].append(r["id"])
-    for (a, b), rel_ids in sorted(host_pairs.items()):
-        out.links.append(Link(
-            "url_host", a, b, f"{label[a]} and {label[b]} are a URL and its host",
-            tuple(Evidence("relation", i) for i in rel_ids),
-        ))
+            by_kind[r["kind"]][_pair(r["parent_id"], r["child_id"])].append(r["id"])
+    host_pairs = {pair for pairs in by_kind.values() for pair in pairs}  # already explained structurally
+    for rule, parts in (("url_host", "are a URL and its host"), ("email_domain", "are an e-mail address and its domain")):
+        for (a, b), rel_ids in sorted(by_kind[rule].items()):
+            out.links.append(Link(
+                rule, a, b, f"{label[a]} and {label[b]} {parts}",
+                tuple(Evidence("relation", i) for i in rel_ids),
+            ))
 
     # --- same_line -------------------------------------------------------
     # Observations arrive ordered by (source, line), so each line's group is processed and dropped:

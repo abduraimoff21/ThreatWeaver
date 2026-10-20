@@ -45,3 +45,14 @@ AMBIGUOUS_TLDS = frozenset({"py", "sh", "pl", "md", "rs", "so", "zip", "mov", "c
 COMMON_SECOND_LEVELS = frozenset({"com", "net", "org", "edu", "gov", "mil", "co", "ac", "info", "biz"})
 
 KNOWN_TLDS = CC_TLDS | GENERIC_TLDS
+
+# Public mailbox providers. An address there (someone@gmail.com) is kept as an e-mail indicator, but its
+# provider is not turned into a domain indicator of its own: every unrelated address at the same provider
+# would otherwise be linked together through it, and `gmail.com` would rank on volume alone.
+FREE_MAIL_DOMAINS = frozenset(
+    """
+    gmail.com googlemail.com outlook.com hotmail.com live.com msn.com yahoo.com ymail.com aol.com icloud.com
+    me.com mac.com proton.me protonmail.com pm.me gmx.com gmx.net gmx.de mail.com mail.ru yandex.com yandex.ru
+    zoho.com qq.com 163.com 126.com sina.com rediffmail.com tutanota.com tuta.io
+    """.split()
+)

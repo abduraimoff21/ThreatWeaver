@@ -7,6 +7,10 @@ deleting duplicates would lose the provenance, so duplicates are collapsed by
 construction and the evidence is kept in `observations`.
 
 Ingesting the same source content twice is a no-op.
+
+The `plan` and `feedback` tables belong to the first and last stages of the
+intelligence cycle (see lifecycle.py). Analysis never reads them, so writing
+to them does not invalidate a finished analysis.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .extract import extract
+from .models import IocType
 from .normalize import normalize
 
 SCHEMA = """
@@ -109,6 +114,23 @@ CREATE TABLE IF NOT EXISTS advisory_events (
     content_sha256 TEXT NOT NULL,
     note           TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS plan (
+    id          INTEGER PRIMARY KEY,
+    requirement TEXT NOT NULL,
+    audience    TEXT NOT NULL,
+    marking     TEXT NOT NULL,
+    author      TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS feedback (
+    id       INTEGER PRIMARY KEY,
+    ioc_id   INTEGER NOT NULL REFERENCES iocs(id),
+    verdict  TEXT NOT NULL,
+    note     TEXT NOT NULL DEFAULT '',
+    reviewer TEXT NOT NULL,
+    at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_ioc ON feedback(ioc_id);
 CREATE INDEX IF NOT EXISTS idx_intel_ioc ON intel(ioc_id);
 CREATE INDEX IF NOT EXISTS idx_rel_parent ON relations(parent_id);
 CREATE INDEX IF NOT EXISTS idx_rel_child ON relations(child_id);
@@ -234,9 +256,10 @@ def _store_chunk(
             totals.new_observations += 1
             obs_ids[id(cand)] = cur.lastrowid
         if cand.derived_from is not None and id(cand.derived_from) in ioc_ids:
+            kind = "email_domain" if cand.derived_from.type == IocType.EMAIL else "url_host"
             conn.execute(
-                "INSERT OR IGNORE INTO relations (parent_id, child_id, kind, source_id) VALUES (?, ?, 'url_host', ?)",
-                (ioc_ids[id(cand.derived_from)], ioc_id, source_id),
+                "INSERT OR IGNORE INTO relations (parent_id, child_id, kind, source_id) VALUES (?, ?, ?, ?)",
+                (ioc_ids[id(cand.derived_from)], ioc_id, kind, source_id),
             )
 
 
@@ -389,3 +412,81 @@ def provenance(conn: sqlite3.Connection, ioc_type: str, value: str) -> list[sqli
         "WHERE i.type = ? AND i.value = ? ORDER BY s.name, o.span_start",
         (ioc_type, value),
     ).fetchall()
+
+
+# ------------------------------------------------------------------ removing an upload
+REMOVE_BATCH = 100_000  # sightings deleted per transaction; keeps the write-ahead log small on a huge source
+
+
+@dataclass(frozen=True)
+class RemovalResult:
+    source_id: int
+    name: str
+    sightings: int  # sightings of that source that were deleted
+    relations: int  # url_host / email_domain relations recorded by that source
+    indicators: int  # indicators seen nowhere else, which were deleted too
+
+
+def remove_source(
+    conn: sqlite3.Connection,
+    source_id: int,
+    progress: Callable[[int, int], None] | None = None,
+    batch: int = REMOVE_BATCH,
+) -> RemovalResult:
+    """Delete one uploaded file or pasted text: its sightings, its relations, and every indicator that was
+    seen nowhere else. Indicators that other sources, a feed or an analyst's verdict still refer to are kept.
+
+    Feed snapshots are not uploads and are refused. The correlation cache (`links`) is cleared because it
+    was computed from data that has changed. Sightings go in batches, each its own transaction, so a source
+    with millions of them does not build a giant write-ahead log; `progress` is called with (done, total)
+    after each one. If the process dies half way the source is still listed: remove it again to finish
+    (indicators that only that part of the source mentioned can then be left behind, unused and harmless).
+    """
+    row = conn.execute("SELECT id, name, kind FROM sources WHERE id = ?", (source_id,)).fetchone()
+    if row is None:
+        raise LookupError("no such source")
+    if row["kind"] == "feed":
+        raise ValueError("a feed snapshot is not an upload; download the feed again to replace it")
+    total = conn.execute("SELECT COUNT(*) FROM observations WHERE source_id = ?", (source_id,)).fetchone()[0]
+    done = 0
+    # Every sighting of this source goes, children (the host of a URL) and parents together, so the references
+    # between them hold once it is finished. SQLite checks them row by row, which would stop a batch that
+    # deletes a parent first, so checking is paused on this connection while the batches run.
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        with conn:
+            conn.execute("CREATE TEMP TABLE IF NOT EXISTS removing_iocs (ioc_id INTEGER PRIMARY KEY)")
+            conn.execute("DELETE FROM removing_iocs")
+        lo, hi = conn.execute("SELECT MIN(id), MAX(id) FROM observations WHERE source_id = ?", (source_id,)).fetchone()
+        start = lo
+        while lo is not None and start <= hi:
+            end = start + max(1, batch) - 1
+            with conn:
+                conn.execute("INSERT OR IGNORE INTO removing_iocs SELECT ioc_id FROM observations "
+                             "WHERE source_id = ? AND id BETWEEN ? AND ?", (source_id, start, end))
+                done += conn.execute("DELETE FROM observations WHERE source_id = ? AND id BETWEEN ? AND ?",
+                                     (source_id, start, end)).rowcount
+            if progress:
+                progress(done, total)
+            start = end + 1
+        with conn:
+            conn.execute("INSERT OR IGNORE INTO removing_iocs SELECT parent_id FROM relations WHERE source_id = ?", (source_id,))
+            conn.execute("INSERT OR IGNORE INTO removing_iocs SELECT child_id FROM relations WHERE source_id = ?", (source_id,))
+            relations = conn.execute("DELETE FROM relations WHERE source_id = ?", (source_id,)).rowcount
+            conn.execute("DELETE FROM links")
+            removed = conn.execute(
+                "DELETE FROM iocs WHERE id IN (SELECT ioc_id FROM removing_iocs) "
+                "AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.ioc_id = iocs.id) "
+                "AND NOT EXISTS (SELECT 1 FROM intel t WHERE t.ioc_id = iocs.id) "
+                "AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.parent_id = iocs.id) "
+                "AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.child_id = iocs.id) "
+                "AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.ioc_id = iocs.id)").rowcount
+            conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+            conn.execute("DROP TABLE IF EXISTS temp.removing_iocs")
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    try:  # give the space in the log back; a reader that is busy just means it happens later
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.DatabaseError:
+        pass
+    return RemovalResult(source_id, row["name"], done, relations, removed)

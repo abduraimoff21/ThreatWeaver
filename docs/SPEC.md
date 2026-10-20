@@ -19,7 +19,7 @@
 
 ## Functional requirements
 
-- Extract IPs, domains, URLs, hashes.
+- Extract IPs, domains, URLs, hashes (later also e-mail addresses and attachment file names; see the decisions below).
 - Normalize them.
 - Deduplicate with provenance.
 - Enrich from public sources.
@@ -72,3 +72,7 @@ Decisions recorded while building:
 - Observations now store the log line around each sighting (display only; not included in reports or advisories).
 - Large inputs: files up to 1 GB are accepted by the dashboard (streamed to disk, ingested in chunks as a background job). Ingest memory is bounded; analysis memory is bounded by the number of distinct indicators, not by log size.
 - A source's SHA-256 is now the hash of the file's raw bytes (line endings preserved), so it matches `Get-FileHash`.
+- The link graph shows a selection, not everything: the highest-priority indicators, what they connect to (at most 500), and each indicator's strongest links. A big log has far more links than a screen can show.
+- E-mail addresses and attachment file names are indicators (`email`, `filename`). The part before the "@" and file names are kept exactly as written; an address's domain is recorded as a derived indicator linked by `email_domain` (weight 3), except for public mailbox providers. File names are extracted only when the text labels them as files or when an executable is dressed as a document (`invoice.pdf.exe`, rule TW-T11, +25), because unlabelled names are far too common in ordinary logs.
+- An uploaded file or pasted text can be removed from the dashboard (Collect step). Removal is permanent and confirmed twice (the page asks; the server refuses a request that does not say it was confirmed), runs as a background job in batches, deletes the source's sightings and relations plus every indicator seen nowhere else, and keeps indicators that another source, a feed record or an analyst verdict still refers to. Feed snapshots cannot be removed this way. The correlation cache is cleared.
+- The dashboard follows the six stages of the intelligence cycle: Plan, Collect, Process, Analyse, Share, Feedback. Plan (the question, audience and TLP sharing level) and Feedback (analyst verdicts) are the only stages with data of their own. Feedback never changes a score; it is shown in the report, summarised by suggested level, and keeps indicators judged a false alarm or expected out of new advisory drafts. The early stages (Home, Plan, Collect, Process summary) never run the analysis, so they load at once on a very large database.

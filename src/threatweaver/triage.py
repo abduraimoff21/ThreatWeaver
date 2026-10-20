@@ -13,13 +13,15 @@ Rules (points)
   TW-T05  +10  ... and that URL is online
   TW-T06  +10  seen in 2+ different local sources
   TW-T07  +10  an analyst defanged it (they already judged it dangerous)
-  TW-T08  +15  linked (url_host / same_line / hostname_ip) to an indicator that scored "high"
+  TW-T08  +15  linked (url_host / email_domain / same_line / hostname_ip) to an indicator that scored "high"
                on its own merits (first pass; no cascading)
   TW-T09  floor  private / loopback / link-local / multicast address: never above "info"
   TW-T10  +10/+25/+30  high-volume repeat activity: 100 / 1,000 / 10,000+ sightings of a
                network indicator (IP, domain, URL). Volume is a prompt to look, not evidence
                of malice (public DNS, CDNs and scanners you run all score high here), so the
                tiers top out below "high" and it only ever adds to other evidence.
+  TW-T11  +25  a file name that hides an executable behind a document extension
+               (invoice.pdf.exe). On its own it reaches "medium": worth a look, not proof.
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ RULE_DESCRIPTIONS = {
     "TW-T08": "Linked to an indicator that is high risk on its own",
     "TW-T09": "Non-routable address: capped at info",
     "TW-T10": "High-volume repeat activity (volume is a prompt to look, not proof)",
+    "TW-T11": "File name hides an executable behind a document extension",
 }
 
 
@@ -175,6 +178,10 @@ def triage(conn: sqlite3.Connection, result: CorrelationResult | None = None) ->
                     "TW-T10", tier,
                     f"seen {count:,} times across {spread} source{'s' if spread != 1 else ''}; heavy repeat activity is worth a look but is not proof of malice",
                     tuple(Evidence("observation", i) for i in st.first_ids), st.count))
+        if iocs[ioc_id]["type"] == "filename" and "disguised" in json.loads(iocs[ioc_id]["attrs"]):
+            hits.append(RuleHit(
+                "TW-T11", 25, "the name puts an executable extension after a document extension, a common way to get a program opened as if it were a document",
+                tuple(Evidence("observation", i) for i in st.first_ids), st.count))
         return hits
 
     base = {i: first_pass(i) for i in local}
@@ -182,7 +189,7 @@ def triage(conn: sqlite3.Connection, result: CorrelationResult | None = None) ->
 
     neighbours = defaultdict(list)
     for link in result.links:
-        if link.rule in ("url_host", "same_line", "hostname_ip"):
+        if link.rule in ("url_host", "email_domain", "same_line", "hostname_ip"):
             neighbours[link.a].append((link.b, link))
             neighbours[link.b].append((link.a, link))
 

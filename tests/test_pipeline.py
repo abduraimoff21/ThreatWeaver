@@ -344,3 +344,77 @@ def test_volume_rule_is_described_and_traceable():
     rule = next(r for r in ind["rules"] if r["rule"] == "TW-T10")
     assert rule["evidence_total"] == 1500 and len(rule["evidence"]) == 20
     assert verify_traceability(conn, report)["unresolved"] == 0
+
+
+# ------------------------------------------------------------- e-mail addresses and attachment names
+MAIL = (
+    "From: Billing <billing@invoice-update.example.org>\n"
+    'Content-Disposition: attachment; filename="Invoice_4471.pdf.exe"\n'
+    "Relay 198.51.100.77 delivered it\n"
+)
+
+
+def test_an_email_and_its_domain_are_linked_structurally_and_the_pair_is_not_also_a_co_occurrence():
+    conn = make(MAIL)
+    ident = {r["id"]: f"{r['type']} {r['value']}" for r in conn.execute("SELECT id, type, value FROM iocs")}
+    links = {(l.rule, ident[l.a], ident[l.b]) for l in correlate(conn).links}
+    assert ("email_domain", "domain invoice-update.example.org", "email billing@invoice-update.example.org") in links or \
+           ("email_domain", "email billing@invoice-update.example.org", "domain invoice-update.example.org") in links
+    pair = {"domain invoice-update.example.org", "email billing@invoice-update.example.org"}
+    assert not [l for l in correlate(conn).links if l.rule == "same_line" and {ident[l.a], ident[l.b]} == pair]
+
+
+def test_the_domain_of_an_email_groups_with_the_email_into_one_case():
+    conn = make(MAIL + "later: other@invoice-update.example.org wrote again\n")
+    cases = {tuple(sorted(c)) for c in clusters(*_ids_and_links(conn))}
+    values = {r["id"]: f"{r['type']} {r['value']}" for r in conn.execute("SELECT id, type, value FROM iocs")}
+    named = [{values[i] for i in case} for case in cases]
+    assert {"email billing@invoice-update.example.org", "email other@invoice-update.example.org",
+            "domain invoice-update.example.org"} in named
+
+
+def _ids_and_links(conn):
+    result = correlate(conn)
+    return [r["id"] for r in conn.execute("SELECT id FROM iocs ORDER BY id")], result.links
+
+
+def test_two_addresses_at_a_free_mail_provider_are_not_pulled_into_one_case():
+    conn = make("sender scammer@gmail.com\nunrelated victim@gmail.com\n")
+    assert {l.rule for l in correlate(conn).links} == set()  # no shared domain indicator, no shared line
+
+
+def test_a_document_extension_followed_by_an_executable_one_scores_medium_and_says_why():
+    conn = make(MAIL)
+    verdicts = {v.value: v for v in triage(conn).values()}
+    v = verdicts["Invoice_4471.pdf.exe"]
+    assert [h.rule for h in v.hits] == ["TW-T11"] and v.score == 25 and v.level == "medium"
+    assert "document extension" in v.hits[0].reason and v.hits[0].evidence
+    assert verdicts["billing@invoice-update.example.org"].level == "info"  # an address alone says nothing
+
+
+def test_an_ordinary_attachment_name_is_not_scored():
+    conn = make('Content-Disposition: attachment; filename="Quarterly_report.pdf"\nAttachment: setup.exe\n')
+    assert {v.value: (v.score, v.level) for v in triage(conn).values()} == {"Quarterly_report.pdf": (0, "info"), "setup.exe": (0, "info")}
+
+
+def test_high_volume_scoring_does_not_apply_to_emails_or_file_names():
+    conn = make("".join(f"{i} bob@example.org invoice.pdf.exe\n" for i in range(1_200)))
+    by_value = {v.value: v for v in triage(conn).values()}
+    assert "TW-T10" not in {h.rule for h in by_value["bob@example.org"].hits}
+    assert "TW-T10" not in {h.rule for h in by_value["invoice.pdf.exe"].hits}
+
+
+def test_the_report_defangs_emails_and_file_names_and_stays_traceable():
+    conn = make(MAIL)
+    report = build_report(conn, "2026-10-20T00:00:00+00:00")
+    md = render_markdown(report)
+    assert "billing[@]invoice-update[.]example[.]org" in md and "Invoice_4471[.]pdf[.]exe" in md
+    assert "billing@invoice-update.example.org" not in md and "Invoice_4471.pdf.exe" not in md
+    assert verify_traceability(conn, report)["traceable_fraction"] == 1.0
+
+
+def test_defang_round_trip_for_email_and_file_name_shapes():
+    for value in ["bob@example.org", "A.b+c@sub.example.co.uk", "Invoice 4471.pdf.exe", "logo@2x.png", "a(1).docm"]:
+        assert refang(defang(value)).text == value
+    assert defang("bob@example.org") == "bob[@]example[.]org"
+    assert defang("http://user@host.example.com/x") == "hxxp://user@host[.]example[.]com/x"  # URLs keep their own form

@@ -3,7 +3,3 @@ Config files touched: settings.json, notes.md, report.pdf, setup.py, deploy.sh, 
 Invalid addresses: 999.1.1.1, 256.256.256.256, 1.2.3, 1.2.3.4.5, 01.02.03.04
 Timestamps and misc: 12:30:45, 2026-10-15, std::string, aa:bb:cc:dd:ee:ff, ratio 3:1
 Unrelated: version=10.2.3 ; foo.bar.baz ; localhost ; server_01.local
-Package pins: lodash@4.17.21, react@18.2.0 and the icon logo@2x.png
-Prompt: root@localhost and admin@server_01
-Files in the build: archive.zip, setup.exe, invoice.pdf, config.json, libfoo.so.1
-Tickets: name=value, filename without equals, attachment of 3 files

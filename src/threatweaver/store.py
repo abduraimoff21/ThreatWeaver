@@ -7,10 +7,6 @@ deleting duplicates would lose the provenance, so duplicates are collapsed by
 construction and the evidence is kept in `observations`.
 
 Ingesting the same source content twice is a no-op.
-
-The `plan` and `feedback` tables belong to the first and last stages of the
-intelligence cycle (see lifecycle.py). Analysis never reads them, so writing
-to them does not invalidate a finished analysis.
 """
 
 from __future__ import annotations
@@ -26,7 +22,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .extract import extract
-from .models import IocType
 from .normalize import normalize
 
 SCHEMA = """
@@ -114,23 +109,6 @@ CREATE TABLE IF NOT EXISTS advisory_events (
     content_sha256 TEXT NOT NULL,
     note           TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE IF NOT EXISTS plan (
-    id          INTEGER PRIMARY KEY,
-    requirement TEXT NOT NULL,
-    audience    TEXT NOT NULL,
-    marking     TEXT NOT NULL,
-    author      TEXT NOT NULL,
-    created_at  TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS feedback (
-    id       INTEGER PRIMARY KEY,
-    ioc_id   INTEGER NOT NULL REFERENCES iocs(id),
-    verdict  TEXT NOT NULL,
-    note     TEXT NOT NULL DEFAULT '',
-    reviewer TEXT NOT NULL,
-    at       TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_feedback_ioc ON feedback(ioc_id);
 CREATE INDEX IF NOT EXISTS idx_intel_ioc ON intel(ioc_id);
 CREATE INDEX IF NOT EXISTS idx_rel_parent ON relations(parent_id);
 CREATE INDEX IF NOT EXISTS idx_rel_child ON relations(child_id);
@@ -256,10 +234,9 @@ def _store_chunk(
             totals.new_observations += 1
             obs_ids[id(cand)] = cur.lastrowid
         if cand.derived_from is not None and id(cand.derived_from) in ioc_ids:
-            kind = "email_domain" if cand.derived_from.type == IocType.EMAIL else "url_host"
             conn.execute(
-                "INSERT OR IGNORE INTO relations (parent_id, child_id, kind, source_id) VALUES (?, ?, ?, ?)",
-                (ioc_ids[id(cand.derived_from)], ioc_id, kind, source_id),
+                "INSERT OR IGNORE INTO relations (parent_id, child_id, kind, source_id) VALUES (?, ?, 'url_host', ?)",
+                (ioc_ids[id(cand.derived_from)], ioc_id, source_id),
             )
 
 

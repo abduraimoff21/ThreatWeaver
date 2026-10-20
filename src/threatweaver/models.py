@@ -14,8 +14,6 @@ class IocType(StrEnum):
     MD5 = "md5"
     SHA1 = "sha1"
     SHA256 = "sha256"
-    EMAIL = "email"
-    FILENAME = "filename"  # an attachment or downloaded file's name (extracted only when labelled or disguised)
 
 
 HASH_LENGTHS = {32: IocType.MD5, 40: IocType.SHA1, 64: IocType.SHA256}
@@ -28,7 +26,7 @@ class Candidate:
     `value` is the refanged text; `raw` is the exact slice of the original
     input (still defanged, if it was). `start`/`end` index the original input.
     A candidate with `derived_from` set was not written in the text on its own;
-    it is the host part of a URL, or the domain part of an e-mail address.
+    it is the host part of a URL.
     """
 
     type: IocType

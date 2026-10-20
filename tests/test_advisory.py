@@ -69,16 +69,6 @@ def test_undefanged_indicator_is_a_warning_not_a_block():
     assert advisory.blocking_findings("see http://bad.example.org/x") == []
 
 
-def test_emails_and_attachment_names_in_a_draft_must_be_defanged_but_only_staff_addresses_block():
-    text = "The lure was sent from phish@invoice-update.example.org with Attachment: invoice.pdf.exe"
-    findings = check_confidentiality(text)
-    assert [f.blocking for f in findings if f.kind == "indicator_not_defanged"] == [False, False]  # address and file name
-    assert advisory.blocking_findings(text) == []  # placeholder domain: fine
-    defanged = "phish[@]invoice-update[.]example[.]org with Attachment: invoice[.]pdf[.]exe"
-    assert not [f for f in check_confidentiality(defanged) if f.kind == "indicator_not_defanged"]
-    assert "email_address" in {f.kind for f in advisory.blocking_findings("sent by jane.doe@realcompany.com")}  # a real mailbox still blocks
-
-
 # ------------------------------------------------------------- lifecycle
 def test_full_happy_path_writes_local_files_and_logs_every_step(conn, tmp_path):
     adv_id = approved(conn)

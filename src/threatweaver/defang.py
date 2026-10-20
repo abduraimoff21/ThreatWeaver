@@ -103,8 +103,6 @@ def defang(value: str) -> str:
         scheme, rest = value.split("://", 1)
         scheme = {"http": "hxxp", "https": "hxxps"}.get(scheme.lower(), scheme)
         return f"{scheme}://{rest.replace('.', '[.]')}"
-    if "@" in value:  # an e-mail address (or a file name that contains one): break the address and the domain
-        return value.replace("@", "[@]").replace(".", "[.]")
     if ":" in value:  # IPv6
         return value.replace(":", "[:]")
     return value.replace(".", "[.]")

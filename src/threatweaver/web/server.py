@@ -52,8 +52,6 @@ _ID = re.compile(r"^/api/(case|indicator|advisory)/([A-Za-z0-9-]{1,40})$")
 _ADV_ACTION = re.compile(r"^/api/advisory/(\d{1,9})/(edit|submit|approve|reject|publish)$")
 
 POST_ROUTES = {
-    "/api/plan": api.plan_save,
-    "/api/feedback": api.feedback_add,
     "/api/ingest": api.ingest,
     "/api/feeds/fetch": api.fetch_feed,
     "/api/advisory/draft": api.advisory_draft,
@@ -192,10 +190,6 @@ def make_handler(ctx: Context, token: str, port: int) -> type[BaseHTTPRequestHan
                 self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal error; see the terminal")
 
         def _route_get(self, path: str, query: dict[str, str]) -> Any:
-            if path == "/api/status":
-                return api.status(ctx)
-            if path == "/api/feedback":
-                return api.feedback_overview(ctx)
             if path == "/api/overview":
                 return api.overview(ctx)
             if path == "/api/cases":

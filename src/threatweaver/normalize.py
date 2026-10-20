@@ -5,8 +5,7 @@ indicator must collapse to the same string and two different indicators must
 not. Normalization is conservative: it only applies rewrites that cannot change
 what the indicator refers to (case of hosts, default ports, fragments, dot
 segments, percent-encoding of unreserved characters). Query strings are never
-reordered. E-mail addresses keep their local part as written; file names are kept
-exactly.
+reordered.
 """
 
 from __future__ import annotations
@@ -16,7 +15,6 @@ import re
 from urllib.parse import urlsplit
 
 from .extract import valid_domain, valid_domain_syntax
-from .files import disguised_executable, extension, valid_filename
 from .models import HASH_LENGTHS, Candidate, IocType, NormalizedIoc
 
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ftp": 21}
@@ -67,30 +65,6 @@ def _normalize_domain(value: str, trusted: bool = False) -> str:
     if not ok:
         raise ValueError(f"not a valid domain: {value!r}")
     return name
-
-
-_LOCAL_PART = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._%+\-]{0,63}")
-
-
-def _normalize_email(value: str) -> NormalizedIoc:
-    """The domain is lower-cased; the part before the "@" is kept exactly as written, because a mail system
-    is allowed to treat it as case-sensitive. (Two spellings still share a domain, so they stay linked.)"""
-    local, sep, domain = value.strip().rpartition("@")
-    if not sep or not _LOCAL_PART.fullmatch(local) or local.endswith(".") or ".." in local:
-        raise ValueError(f"not a valid e-mail address: {value!r}")
-    domain_n = _normalize_domain(domain)
-    return NormalizedIoc(IocType.EMAIL, f"{local}@{domain_n}", {"domain": domain_n})
-
-
-def _normalize_filename(value: str) -> NormalizedIoc:
-    """Kept exactly as written (surrounding spaces aside): whether case matters depends on the file system."""
-    name = value.strip()
-    if not valid_filename(name):
-        raise ValueError(f"not a valid file name: {value!r}")
-    attrs = {"extension": extension(name)}
-    if disguised_executable(name):
-        attrs["disguised"] = "document extension followed by an executable one"
-    return NormalizedIoc(IocType.FILENAME, name, attrs)
 
 
 def _normalize_pct(s: str) -> str:
@@ -172,10 +146,6 @@ def normalize_value(kind: IocType, value: str, trusted: bool = False) -> Normali
         return NormalizedIoc(kind, _normalize_domain(value, trusted))
     if kind == IocType.URL:
         return _normalize_url(value, trusted)
-    if kind == IocType.EMAIL:
-        return _normalize_email(value)
-    if kind == IocType.FILENAME:
-        return _normalize_filename(value)
     if kind in (IocType.MD5, IocType.SHA1, IocType.SHA256):
         h = value.strip().lower()
         if HASH_LENGTHS.get(len(h)) != kind or not re.fullmatch(r"[0-9a-f]+", h):

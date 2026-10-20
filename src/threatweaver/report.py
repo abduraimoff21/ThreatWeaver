@@ -22,7 +22,6 @@ from typing import Any
 from . import __version__
 from .correlate import CorrelationResult, Evidence, clusters, correlate
 from .defang import defang
-from .lifecycle import defang_text
 from .triage import LEVELS, RULE_DESCRIPTIONS, Verdict, triage
 
 NOTICE = (
@@ -195,13 +194,6 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         f"> {report['notice']}",
         "",
-    ]
-    plan = report.get("plan")  # added by the dashboard from the Plan step; the core report does not depend on it
-    if plan:
-        out += ["## Question this report answers", "", plan["requirement"], "",
-                f"Audience: {plan['audience'] or 'not stated'}. Handling: **{plan['marking']}** ({plan['marking_meaning']}) "
-                f"Set by {plan['author']} on {plan['created_at'][:10]}.", ""]
-    out += [
         "## Summary",
         "",
         f"{s['indicators']} indicators in {s['cases']} case(s); {s['links']} correlation links; {s['feed_matches']} feed matches.",
@@ -254,21 +246,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         out += [f"| {i['type']} | `{d(i['type'], i['value'])}` | {i['sightings_total']} |" for i in rows[:MAX_QUIET_ROWS]]
         if len(rows) > MAX_QUIET_ROWS:
             out.append(f"\n...and {len(rows) - MAX_QUIET_ROWS} more quiet indicators (most-seen first are shown above).")
-    feedback = report.get("feedback")  # likewise added from the Feedback step
-    if feedback and feedback["items"]:
-        out += ["", "## Analyst feedback", "",
-                "People who reviewed indicators recorded these verdicts. They do not change any score; they show where the rules may need attention.", "",
-                "| Verdict | Suggested level | Type | Indicator | Reviewer | Note |", "|---|---|---|---|---|---|"]
-        for item in feedback["items"]:
-            note = defang_text(item["note"]).replace("|", "/")
-            out.append(f"| {item['label']} | {item['level'] or '-'} | {item['type']} | `{d(item['type'], item['value'])}` | {item['reviewer']} | {note} |")
-        if feedback["total"] > len(feedback["items"]):
-            out.append(f"\n...and {feedback['total'] - len(feedback['items'])} more reviewed indicators.")
     out += ["", "## Method and limitations", "",
             "Triage rules:", ""]
     out += [f"- `{k}` {v}" for k, v in report["rule_catalog"].items()]
     out += ["",
-            "Links come from five rules only (url_host, email_domain, same_line, hostname_ip, shared_family); same_line means the same line of the same source and is evidence of co-occurrence, not of causation; hostname_ip relies on the naming convention of the host name and is a strong hint, not proof, that both refer to the same machine.",
+            "Links come from four rules only (url_host, same_line, hostname_ip, shared_family); same_line means the same line of the same source and is evidence of co-occurrence, not of causation; hostname_ip relies on the naming convention of the host name and is a strong hint, not proof, that both refer to the same machine.",
             "Feed data is a point-in-time snapshot of public lists and can be stale or wrong. Absence from a feed is not evidence of safety.",
             ""]
     return "\n".join(out)

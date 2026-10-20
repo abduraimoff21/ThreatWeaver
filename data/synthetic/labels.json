@@ -61,6 +61,14 @@
     {
       "type": "domain",
       "value": "cert.example.com"
+    },
+    {
+      "type": "email",
+      "value": "billing@invoice-update.example.org"
+    },
+    {
+      "type": "email",
+      "value": "analyst@cert.example.com"
     }
   ],
   "03-hashes.txt": [
@@ -190,6 +198,10 @@
     {
       "type": "domain",
       "value": "mx.example.com"
+    },
+    {
+      "type": "email",
+      "value": "user@mail.example.com"
     }
   ],
   "08-proxy-urls.txt": [
@@ -242,6 +254,10 @@
     {
       "type": "domain",
       "value": "example.org"
+    },
+    {
+      "type": "email",
+      "value": "bob@example.org"
     }
   ],
   "10-reverse-dns.txt": [
@@ -269,5 +285,24 @@
       "type": "domain",
       "value": "arx58.dsl.example-isp.pl"
     }
+  ],
+  "11-emails-and-attachments.txt": [
+    {"type": "email", "value": "billing@invoice-update.example.org"},
+    {"type": "domain", "value": "invoice-update.example.org"},
+    {"type": "email", "value": "victim@corp.example.net"},
+    {"type": "domain", "value": "corp.example.net"},
+    {"type": "email", "value": "helpdesk@payments-secure.example.com"},
+    {"type": "domain", "value": "payments-secure.example.com"},
+    {"type": "filename", "value": "Invoice_4471.zip"},
+    {"type": "filename", "value": "Invoice_4471.pdf.exe"},
+    {"type": "filename", "value": "Statement_Oct.docm"},
+    {"type": "filename", "value": "remit.xlsm"},
+    {"type": "filename", "value": "Q3-report.pdf"},
+    {"type": "filename", "value": "Payroll_2026.xlsm"},
+    {"type": "email", "value": "scammer@gmail.com"},
+    {"type": "filename", "value": "Receipt_9921.pdf.scr"},
+    {"type": "email", "value": "abuse@isp.example.net"},
+    {"type": "domain", "value": "isp.example.net"},
+    {"type": "ipv4", "value": "198.51.100.77"}
   ]
 }

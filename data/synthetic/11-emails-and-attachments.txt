@@ -1,0 +1,13 @@
+From: Billing Team <billing@invoice-update.example.org>
+To: <victim@corp.example.net>
+Reply-To: helpdesk@payments-secure[.]example[.]com
+Subject: Overdue invoice 4471
+Content-Type: application/zip; name="Invoice_4471.zip"
+Content-Disposition: attachment; filename="Invoice_4471.pdf.exe"
+Attachment: Statement_Oct.docm
+Attachments: remit.xlsm, Q3-report.pdf
+File name: Payroll_2026.xlsm
+The sender also used scammer@gmail.com as a backup contact.
+Dropper written to C:\Users\Public\Documents\Receipt_9921.pdf.scr on the host.
+Contact the abuse desk at abuse[at]isp[.]example[.]net for takedown.
+Server relay 198.51.100.77 delivered the message.

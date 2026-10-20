@@ -22,6 +22,8 @@ SAME = [
     (IocType.URL, ["https://x.example.com", "https://x.example.com/", "https://x.example.com:443/"]),
     (IocType.URL, ["http://x.example.com/%7Euser", "http://x.example.com/~user"]),
     (IocType.URL, ["http://x.example.com/?q=%2f", "http://x.example.com/?q=%2F"]),
+    (IocType.EMAIL, ["bob@example.org", "bob@Example.ORG", " bob@example.org ", "bob@example.org."]),
+    (IocType.FILENAME, ["invoice.pdf.exe", " invoice.pdf.exe "]),
 ]
 
 # Pairs that MUST stay distinct: normalization must not over-merge.
@@ -33,6 +35,12 @@ DIFFERENT = [
     (IocType.URL, "http://x.example.com/a%2Fb", "http://x.example.com/a/b"),
     (IocType.URL, "http://u@x.example.com/", "http://x.example.com/"),
     (IocType.DOMAIN, "a.example.com", "example.com"),
+    # the part before the "@" may be case-sensitive, so it is never rewritten
+    (IocType.EMAIL, "bob@example.org", "Bob@example.org"),
+    (IocType.EMAIL, "bob@example.org", "bob+tag@example.org"),
+    (IocType.EMAIL, "bob@example.org", "bob@mail.example.org"),
+    # whether a file name's case matters depends on the file system, so it is never rewritten
+    (IocType.FILENAME, "Invoice.PDF.exe", "invoice.pdf.exe"),
 ]
 
 
@@ -70,11 +78,39 @@ def test_ip_scope_attrs():
         (IocType.URL, "gopher://x.example.com/"),
         (IocType.URL, "http:///nohost"),
         (IocType.URL, "http://x.example.com:notaport/"),
+        (IocType.EMAIL, "not-an-email"),
+        (IocType.EMAIL, "bob@localhost"),
+        (IocType.EMAIL, "@example.org"),
+        (IocType.EMAIL, "bob.@example.org"),
+        (IocType.EMAIL, "b..ob@example.org"),
+        (IocType.EMAIL, "bob smith@example.org"),
+        (IocType.EMAIL, "bob@example.notatld"),
+        (IocType.EMAIL, "x" * 65 + "@example.org"),
+        (IocType.FILENAME, "noextension"),
+        (IocType.FILENAME, "dir/invoice.pdf"),
+        (IocType.FILENAME, "C:invoice.pdf"),
+        (IocType.FILENAME, "what?.pdf"),
+        (IocType.FILENAME, ".pdf"),
+        (IocType.FILENAME, "a" * 256 + ".pdf"),
+        (IocType.FILENAME, "tab\tname.pdf"),
+        (IocType.FILENAME, ""),
     ],
 )
 def test_invalid_values_raise(kind, bad):
     with pytest.raises(ValueError):
         normalize_value(kind, bad)
+
+
+def test_email_and_file_name_attributes():
+    assert normalize_value(IocType.EMAIL, "Bob@Example.ORG").attrs == {"domain": "example.org"}
+    plain = normalize_value(IocType.FILENAME, "report.pdf").attrs
+    assert plain == {"extension": "pdf"}
+    assert "disguised" in normalize_value(IocType.FILENAME, "report.pdf.exe").attrs
+    assert "disguised" not in normalize_value(IocType.FILENAME, "setup.exe").attrs
+    assert "disguised" not in normalize_value(IocType.FILENAME, "report.exe.pdf").attrs  # the real extension is a document
+    assert "disguised" not in normalize_value(IocType.FILENAME, "pdf.exe").attrs  # nothing in front of the document extension
+    assert "disguised" not in normalize_value(IocType.FILENAME, "setup.dll.exe").attrs  # two programs: not dressed as a document
+    assert "disguised" in normalize_value(IocType.FILENAME, "REPORT.PDF.EXE").attrs  # extensions are compared without case
 
 
 def test_normalization_is_idempotent():

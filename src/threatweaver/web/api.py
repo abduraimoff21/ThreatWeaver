@@ -9,6 +9,7 @@ the analyst asks for exact values.
 
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import re
@@ -18,7 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import advisory, store
+from .. import advisory, lifecycle, store
+from ..correlate import RULES
 from ..defang import defang
 from ..extract import extract
 from ..feeds import FEEDS, FeedError, fetch_text, load_feed
@@ -30,6 +32,9 @@ from .jobs import JobManager
 MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # files streamed to disk and processed in the background
 MAX_PASTE_BYTES = 20 * 1024 * 1024  # pasted text travels as JSON, so it stays small
 MAX_SIGHTINGS = 50
+CASE_INDICATORS_MAX = 500  # a case page lists this many indicators; the Indicators page searches all of them
+CASE_LINKS_MAX = 2000
+DETAIL_LINKS_MAX = 100  # strongest links listed in an indicator's detail panel
 PAGE_SIZE_MAX = 200
 LEVELS = ("high", "medium", "low", "info")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -51,6 +56,7 @@ class Context:
     env: dict[str, str] | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
     _cache: tuple[tuple, Any] | None = None
+    _process_cache: tuple[tuple, dict[str, Any]] | None = None
     _jobs: JobManager | None = None
 
     def connect(self) -> sqlite3.Connection:
@@ -103,11 +109,29 @@ class Analysis:
                 self.indicators[ind["id"]] = ind
                 self.case_of[ind["id"]] = case["case_id"]
         self.cases = {c["case_id"]: c for c in self.report["cases"]}
+        self.graphs: dict[tuple, dict[str, Any]] = {}  # small cache of built graphs, dropped with this snapshot
+        self.adjacencies: dict[tuple, dict[int, list]] = {}  # link index per (case, link types); see _adjacency
+        self._link_index: dict[str, dict[int, list[dict[str, Any]]]] = {}
+
+    def links_of(self, ioc_id: int) -> list[dict[str, Any]]:
+        """The links touching one indicator. Indexed once per case the first time it is asked for, so opening an
+        indicator costs its own links, not every link in a case that may hold millions."""
+        case_id = self.case_of[ioc_id]
+        index = self._link_index.get(case_id)
+        if index is None:
+            index = {}
+            for l in self.cases[case_id]["links"]:
+                index.setdefault(l["a"]["id"], []).append(l)
+                index.setdefault(l["b"]["id"], []).append(l)
+            self._link_index[case_id] = index
+        return index.get(ioc_id, [])
 
 
 def analysis(ctx: Context, conn: sqlite3.Connection) -> Analysis:
+    # Rows are only ever added, so the newest id says whether anything changed. (Counting 14 million
+    # sightings on every request would make every page wait for it.)
     row = conn.execute(
-        "SELECT (SELECT COALESCE(MAX(id), 0) FROM observations), (SELECT COUNT(*) FROM observations), "
+        "SELECT (SELECT COALESCE(MAX(id), 0) FROM observations), "
         "(SELECT COALESCE(MAX(id), 0) FROM intel), (SELECT COUNT(*) FROM sources), "
         "(SELECT COALESCE(MAX(id), 0) FROM relations)"
     ).fetchone()
@@ -199,7 +223,7 @@ def cases(ctx: Context, query: dict[str, str] | None = None) -> dict[str, Any]:
                 "indicators": [_row(i, case["case_id"]) for i in case["indicators"][:6]],
             } for case in page],
             "total": len(chosen), "all_cases": len(everything), "quiet_cases": quiet_total,
-            "offset": offset, "limit": limit,
+            "offset": offset, "limit": limit, "summary": a.report["summary"],
         }
     finally:
         conn.close()
@@ -212,10 +236,12 @@ def case_detail(ctx: Context, case_id: str) -> dict[str, Any]:
         case = a.cases.get(case_id)
         if case is None:
             raise ApiError(404, "case not found")
+        # a case built from a big log can hold hundreds of thousands of indicators: send the strongest page of it
+        shown = case["indicators"][:CASE_INDICATORS_MAX]
         return {
             "case_id": case_id, "max_level": case["max_level"], "max_score": case["max_score"],
-            "indicators": [_row(i, case_id) for i in case["indicators"]],
-            "links": [_link_row(l) for l in case["links"]],
+            "indicators": [_row(i, case_id) for i in shown], "indicators_total": len(case["indicators"]),
+            "links": [_link_row(l) for l in case["links"][:CASE_LINKS_MAX]], "links_total": len(case["links"]),
         }
     finally:
         conn.close()
@@ -248,10 +274,12 @@ def indicators(ctx: Context, query: dict[str, str]) -> dict[str, Any]:
         limit = _int(query.get("limit"), 50, 1, PAGE_SIZE_MAX)
         offset = _int(query.get("offset"), 0, 0, 10**9)
         rows = []
+        judged = lifecycle.latest_verdicts(conn)
         for ind in matches[offset:offset + limit]:  # rows are built for the visible page only
             row = _row(ind, a.case_of[ind["id"]])
             row.update(sightings=ind["sightings_total"], sources=ind["sources"],
-                       feed_matches=ind["feed_matches_total"], rules=[r["rule"] for r in ind["rules"]])
+                       feed_matches=ind["feed_matches_total"], rules=[r["rule"] for r in ind["rules"]],
+                       verdict=judged[ind["id"]]["label"] if ind["id"] in judged else None)
             rows.append(row)
         return {"total": len(matches), "offset": offset, "limit": limit, "rows": rows}
     finally:
@@ -275,13 +303,13 @@ def indicator_detail(ctx: Context, ioc_id: int) -> dict[str, Any]:
             "SELECT o.id, o.raw, o.line_no, o.defanged, o.parent_observation_id, o.context, s.name AS source "
             "FROM observations o JOIN sources s ON s.id = o.source_id WHERE o.ioc_id = ? ORDER BY o.id LIMIT ?",
             (ioc_id, MAX_SIGHTINGS))]
+        mine = a.links_of(ioc_id)
+        strongest = sorted(mine, key=lambda l: (-RULES[l["rule"]][0], -l["evidence_total"], l["a"]["id"], l["b"]["id"]))[:DETAIL_LINKS_MAX]
         links = []
-        for case in [a.cases[a.case_of[ioc_id]]]:
-            for l in case["links"]:
-                if ioc_id in (l["a"]["id"], l["b"]["id"]):
-                    other = l["b"] if l["a"]["id"] == ioc_id else l["a"]
-                    links.append({"rule": l["rule"], "other_id": other["id"], "other_type": other["type"],
-                                  "other": defang(other["value"]), "evidence": l["evidence_total"]})
+        for l in strongest:
+            other = l["b"] if l["a"]["id"] == ioc_id else l["a"]
+            links.append({"rule": l["rule"], "other_id": other["id"], "other_type": other["type"],
+                          "other": defang(other["value"]), "evidence": l["evidence_total"]})
         matches = []
         for m in ind["feed_matches"]:
             fields = {k: _safe_field(k, v) for k, v in m["fields"].items() if v not in ("", None, [])}
@@ -295,7 +323,8 @@ def indicator_detail(ctx: Context, ioc_id: int) -> dict[str, Any]:
             suggested_action=ind["suggested_action"],
             rules=[{"rule": r["rule"], "points": r["points"], "reason": _defang_ioc_text(r["reason"]),
                     "description": RULE_DESCRIPTIONS.get(r["rule"], ""), "evidence_total": r["evidence_total"]} for r in ind["rules"]],
-            sightings=sightings, sightings_total=total, feed_matches=matches, links=links,
+            sightings=sightings, sightings_total=total, feed_matches=matches, links=links, links_total=len(mine),
+            feedback=lifecycle.history(conn, ioc_id),
         )
         return row
     finally:
@@ -306,37 +335,284 @@ def _defang_ioc_text(text: str) -> str:
     return safe_line(text)
 
 
+GRAPH_LIMIT_DEFAULT = 150
+GRAPH_LIMIT_MAX = 500
+GRAPH_NEIGHBOURS = 6  # for each top indicator, how many of its strongest neighbours come with it
+GRAPH_LINKS_PER_NODE = 3  # each indicator keeps its strongest few links in the picture
+GRAPH_EDGE_CAP = 2500  # and the picture never draws more lines than this
+GRAPH_CACHE_SIZE = 16
+GRAPH_ADJACENCY_CACHE = 2
+LEVEL_RANK = {level: n for n, level in enumerate(reversed(LEVELS))}  # info 0 ... high 3
+
+
 def graph(ctx: Context, query: dict[str, str]) -> dict[str, Any]:
+    """A picture a person can read. A big log yields far more links than a screen can show, so this picks the
+    highest-priority indicators and the ones they connect to (not just the top scores, which are often not
+    linked to each other), within `limit`. Filters: case, min_level, rules (comma list), limit."""
+    case_id = query.get("case", "")
+    level = query.get("min_level", "info")
+    if level not in LEVEL_RANK:
+        raise ApiError(400, "unknown priority level")
+    rules = set(filter(None, query.get("rules", "").split(","))) or set(RULES)
+    if not rules <= set(RULES):
+        raise ApiError(400, "unknown link type")
+    limit = _int(query.get("limit"), GRAPH_LIMIT_DEFAULT, 10, GRAPH_LIMIT_MAX)
+    per_node = _int(query.get("per_node"), GRAPH_LINKS_PER_NODE, 1, 20)
     conn = ctx.connect()
     try:
         a = analysis(ctx, conn)
-        case_id = query.get("case", "")
-        if case_id:
-            case = a.cases.get(case_id)
-            if case is None:
-                raise ApiError(404, "case not found")
-            members, links = case["indicators"], case["links"]
-        else:  # everything that has at least one link
-            links = [l for c in a.report["cases"] for l in c["links"]]
-            linked = {l["a"]["id"] for l in links} | {l["b"]["id"] for l in links}
-            members = [i for i in a.indicators.values() if i["id"] in linked]
-            members.sort(key=lambda i: -i["score"])
-            members = members[:300]
-        keep = {i["id"] for i in members}
-        seen, edges = set(), []
-        for l in links:
-            key = (l["rule"], l["a"]["id"], l["b"]["id"])
-            if l["a"]["id"] in keep and l["b"]["id"] in keep and key not in seen:
-                seen.add(key)
-                edges.append({"rule": l["rule"], "a": l["a"]["id"], "b": l["b"]["id"]})
-        return {"nodes": [_row(i, a.case_of[i["id"]]) for i in members], "edges": edges,
-                "truncated": not case_id and len(members) == 300}
+        if case_id and case_id not in a.cases:
+            raise ApiError(404, "case not found")
+        key = (case_id, level, tuple(sorted(rules)), limit, per_node)
+        scope_key = (case_id, tuple(sorted(rules)))
+        with ctx.lock:
+            cached = a.graphs.get(key)
+            adj = a.adjacencies.get(scope_key)
+        if cached is not None:
+            return cached
+        if adj is None:
+            adj = _adjacency(a, case_id, rules)
+            with ctx.lock:
+                if len(a.adjacencies) >= GRAPH_ADJACENCY_CACHE:
+                    a.adjacencies.pop(next(iter(a.adjacencies)))
+                a.adjacencies[scope_key] = adj
+        built = _build_graph(a, case_id, LEVEL_RANK[level], limit, per_node, adj)
+        with ctx.lock:
+            if len(a.graphs) >= GRAPH_CACHE_SIZE:
+                a.graphs.pop(next(iter(a.graphs)))
+            a.graphs[key] = built
+        return built
     finally:
         conn.close()
 
 
+def _adjacency(a: Analysis, case_id: str, rules: set[str]) -> dict[int, list[tuple[str, int, int, int]]]:
+    """indicator id -> the links touching it, as (rule, a_id, b_id, evidence count). Each link is one tuple shared
+    by both ends. Built once per snapshot and link-type choice, so changing the level or size is quick."""
+    ind = a.indicators
+    if case_id:
+        case = a.cases[case_id]
+        scope: set[int] | None = {i["id"] for i in case["indicators"]}
+        raw = ((l["rule"], l["a"]["id"], l["b"]["id"], l["evidence_total"]) for l in case["links"])
+    else:
+        scope = None
+        raw = ((l.rule, l.a, l.b, len(l.evidence) if l.evidence_total is None else l.evidence_total) for l in a.result.links)
+    adj: dict[int, list[tuple[str, int, int, int]]] = {}
+    for link in raw:
+        rule, x, y, _ = link
+        if rule in rules and x != y and x in ind and y in ind and (scope is None or (x in scope and y in scope)):
+            adj.setdefault(x, []).append(link)
+            adj.setdefault(y, []).append(link)
+    return adj
+
+
+def _build_graph(a: Analysis, case_id: str, min_rank: int, limit: int, per_node: int,
+                 adj: dict[int, list[tuple[str, int, int, int]]]) -> dict[str, Any]:
+    ind = a.indicators
+
+    def other(link: tuple[str, int, int, int], me: int) -> int:
+        return link[2] if link[1] == me else link[1]
+
+    # The priority level picks where to start; whatever those indicators connect to comes along at any level,
+    # because "a medium host linked to a dozen quiet addresses" is exactly what an analyst wants to see.
+    seeds = [i for i in adj if LEVEL_RANK[ind[i]["level"]] >= min_rank]
+    chosen: dict[int, None] = {}
+    for seed in sorted(seeds, key=lambda i: (-ind[i]["score"], -len(adj[i]), i)):
+        if len(chosen) >= limit:
+            break
+        chosen.setdefault(seed)
+        near = {other(link, seed) for link in adj[seed]}
+        for o in heapq.nsmallest(GRAPH_NEIGHBOURS, near, key=lambda i: (-ind[i]["score"], i)):
+            if len(chosen) >= limit:
+                break
+            chosen.setdefault(o)
+    case = a.cases[case_id] if case_id else None
+    if case is not None:  # a case page should show the whole case first, linked or not
+        rest = sorted((i for i in case["indicators"] if i["id"] not in chosen and LEVEL_RANK[i["level"]] >= min_rank), key=lambda i: -i["score"])
+        for i in rest[:max(0, limit - len(chosen))]:
+            chosen[i["id"]] = None
+
+    capped = len(chosen) >= limit
+    seen: set[int] = set()
+    every: list[dict[str, Any]] = []
+    for x in chosen:  # only the chosen indicators' own links are looked at, never the whole link list
+        for link in adj.get(x, ()):
+            if id(link) not in seen and link[1] in chosen and link[2] in chosen:
+                seen.add(id(link))
+                every.append({"rule": link[0], "a": link[1], "b": link[2], "evidence": link[3]})
+    edges = _strongest_links(every, per_node)
+    if case is None:  # a node whose neighbours did not fit in the budget is just a dot; leave it out
+        touched = {e["a"] for e in edges} | {e["b"] for e in edges}
+        chosen = {i: None for i in chosen if i in touched}
+    matching = len(seeds) if case is None else sum(1 for i in case["indicators"] if LEVEL_RANK[i["level"]] >= min_rank)
+    nodes = []
+    for i in chosen:
+        row = _row(ind[i], a.case_of[i])
+        row["degree"] = len({other(link, i) for link in adj.get(i, ())})  # how many it is linked to in all, drawn or not
+        nodes.append(row)
+    return {"nodes": nodes, "edges": edges, "edges_total": len(every), "matching": matching, "truncated": capped,
+            "limit": limit, "per_node": per_node}
+
+
+def _strongest_links(every: list[dict[str, Any]], per_node: int) -> list[dict[str, Any]]:
+    """Keep each indicator's strongest links (rule weight, then how often the link was seen). Among a few hundred
+    indicators from a big log nearly every pair is linked, and drawing them all is a solid black disc: this keeps
+    the structure and drops the repetition. An indicator's full list of links is still in its detail panel."""
+    def strength(e: dict[str, Any]) -> tuple[int, int]:
+        return (RULES[e["rule"]][0], e["evidence"])
+
+    touching: dict[int, list[int]] = {}
+    for n, e in enumerate(every):
+        touching.setdefault(e["a"], []).append(n)
+        touching.setdefault(e["b"], []).append(n)
+    keep: set[int] = set()
+    for indexes in touching.values():
+        keep.update(sorted(indexes, key=lambda n: strength(every[n]), reverse=True)[:per_node])
+    kept = sorted(keep, key=lambda n: strength(every[n]), reverse=True)[:GRAPH_EDGE_CAP]
+    return [every[n] for n in sorted(kept)]
+
+
 def sources(ctx: Context) -> dict[str, Any]:
     return {"sources": overview(ctx)["sources"]}
+
+
+# ------------------------------------------------------------------ the intelligence cycle
+FEEDBACK_ITEMS = 100  # reviewed indicators listed on the Feedback page
+REPORT_FEEDBACK_ITEMS = 200  # ... and in the report
+REVIEW_QUEUE = 10
+
+
+def _cached_analysis_summary(ctx: Context, conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """The summary of an analysis that is already in memory and still current; never starts a new one."""
+    row = conn.execute(
+        "SELECT (SELECT COALESCE(MAX(id), 0) FROM observations), (SELECT COALESCE(MAX(id), 0) FROM intel), "
+        "(SELECT COUNT(*) FROM sources), (SELECT COALESCE(MAX(id), 0) FROM relations)").fetchone()
+    with ctx.lock:
+        if ctx._cache and ctx._cache[0] == tuple(row):
+            return ctx._cache[1].report["summary"]
+    return None
+
+
+def status(ctx: Context) -> dict[str, Any]:
+    """Where each stage of the cycle stands and what to do next. Cheap: it never runs the analysis, so the
+    Plan, Collect and Process pages load at once even when the data is large."""
+    conn = ctx.connect()
+    try:
+        version = lifecycle.data_version(conn)
+        with ctx.lock:
+            cached = ctx._process_cache
+        if cached is None or cached[0] != version:
+            cached = (version, lifecycle.process_counts(conn))
+            with ctx.lock:
+                ctx._process_cache = cached
+        busy = ctx._jobs is not None and ctx._jobs.busy()
+        feed_rows = {}
+        for r in conn.execute("SELECT id, name, ingested_at FROM sources WHERE kind = 'feed' ORDER BY id"):
+            feed_rows[r["name"]] = r  # the newest snapshot of each feed wins
+        env = ctx.environ()
+        feeds = []
+        for name, spec in FEEDS.items():
+            latest = feed_rows.get(f"feed:{name}")
+            feeds.append({
+                "feed": name, "loaded": latest is not None, "collected_at": latest["ingested_at"] if latest else None,
+                "records": conn.execute("SELECT COUNT(*) FROM intel WHERE source_id = ?", (latest["id"],)).fetchone()[0] if latest else 0,
+                "needs_key": bool(spec.needs_env), "key_set": bool(spec.needs_env and env.get(spec.needs_env)),
+                "key_variable": spec.needs_env, "min_interval_seconds": spec.min_interval_seconds, "terms_url": spec.terms_url,
+            })
+        out = lifecycle.cycle_status(conn, busy=busy, feeds_loaded=sum(1 for f in feeds if f["loaded"]),
+                                     analysis_summary=_cached_analysis_summary(ctx, conn), process=cached[1])
+        out.update(
+            feeds=feeds,
+            sources=[{"id": r["id"], "name": r["name"], "kind": r["kind"], "sha256": r["content_sha256"], "ingested_at": r["ingested_at"]}
+                     for r in conn.execute("SELECT id, name, kind, content_sha256, ingested_at FROM sources WHERE kind != 'feed' ORDER BY id DESC")],
+            examples=list(lifecycle.PLAN_EXAMPLES), markings=lifecycle.MARKINGS, verdicts=lifecycle.VERDICTS,
+            limits={"upload_bytes": MAX_UPLOAD_BYTES, "paste_bytes": MAX_PASTE_BYTES},
+            database=Path(ctx.db_path).name if ctx.db_path != ":memory:" else ":memory:",
+        )
+        return out
+    finally:
+        conn.close()
+
+
+def plan_save(ctx: Context, body: dict[str, Any]) -> dict[str, Any]:
+    ctx.require_idle()
+    with ctx.lock:
+        conn = ctx.connect()
+        try:
+            return {"plan": lifecycle.save_plan(conn, body.get("requirement"), body.get("audience"),
+                                                body.get("marking"), body.get("author"))}
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from None
+        finally:
+            conn.close()
+
+
+def feedback_add(ctx: Context, body: dict[str, Any]) -> dict[str, Any]:
+    ctx.require_idle()
+    ioc_id = body.get("ioc_id")
+    if not isinstance(ioc_id, int) or isinstance(ioc_id, bool):
+        raise ApiError(400, "ioc_id must be a whole number")
+    with ctx.lock:
+        conn = ctx.connect()
+        try:
+            return {"feedback": lifecycle.add_feedback(conn, ioc_id, body.get("verdict"), body.get("note"), body.get("reviewer"))}
+        except lifecycle.NotFound as exc:
+            raise ApiError(404, str(exc)) from None
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from None
+        finally:
+            conn.close()
+
+
+def _feedback_item(conn: sqlite3.Connection, a: Analysis, fb: dict[str, Any]) -> dict[str, Any]:
+    ind = a.indicators.get(fb["ioc_id"])
+    if ind is not None:
+        row = _row(ind, a.case_of[fb["ioc_id"]])
+    else:  # reviewed, but no longer a local indicator
+        r = conn.execute("SELECT id, type, value, attrs FROM iocs WHERE id = ?", (fb["ioc_id"],)).fetchone()
+        row = {"id": r["id"], "type": r["type"], "value": r["value"], "display": defang(r["value"]), "level": None, "score": 0, "scope": "", "case_id": None}
+    return {**row, "verdict": fb["verdict"], "label": fb["label"], "note": fb["note"], "reviewer": fb["reviewer"], "at": fb["at"]}
+
+
+def feedback_overview(ctx: Context) -> dict[str, Any]:
+    """Stage 6: what people judged, how the suggested levels held up, and what is worth reviewing next."""
+    conn = ctx.connect()
+    try:
+        a = analysis(ctx, conn)
+        latest = lifecycle.latest_verdicts(conn)
+        newest = sorted(latest.values(), key=lambda f: -f["id"])
+        # worth a look next: indicators nobody has judged yet, strongest first; if the data is all "info", the top few anyway
+        unreviewed = (i for i in a.indicators.values() if i["id"] not in latest)
+        candidates = heapq.nlargest(REVIEW_QUEUE * 5, (i for i in unreviewed if i["level"] != "info"), key=lambda i: (i["score"], -i["id"]))
+        if not candidates:
+            candidates = heapq.nlargest(REVIEW_QUEUE * 5, (i for i in a.indicators.values() if i["id"] not in latest),
+                                        key=lambda i: (i["sightings_total"], -i["id"]))
+        queue = [_row(i, a.case_of[i["id"]]) for i in candidates[:REVIEW_QUEUE]]
+        return {
+            "summary": lifecycle.feedback_counts(conn),
+            "accuracy": lifecycle.accuracy_by_level(latest, {i: a.indicators[i]["level"] for i in latest if i in a.indicators}),
+            "items": [_feedback_item(conn, a, fb) for fb in newest[:FEEDBACK_ITEMS]],
+            "total": len(newest), "queue": queue,
+            "queue_is_quiet": bool(queue) and all(q["level"] == "info" for q in queue),
+        }
+    finally:
+        conn.close()
+
+
+def _report_extras(conn: sqlite3.Connection, a: Analysis) -> dict[str, Any]:
+    """The plan and the feedback, added to a copy of the report (the analysis itself does not depend on them)."""
+    extras: dict[str, Any] = {}
+    plan = lifecycle.current_plan(conn)
+    if plan:
+        extras["plan"] = plan
+    latest = lifecycle.latest_verdicts(conn)
+    if latest:
+        order = {"high": 0, "medium": 1, "low": 2, "info": 3, None: 4}
+        items = [_feedback_item(conn, a, fb) for fb in latest.values()]
+        items.sort(key=lambda x: (order.get(x["level"], 4), -x["score"], x["value"]))
+        extras["feedback"] = {"total": len(items), "items": [
+            {k: x[k] for k in ("type", "value", "level", "label", "verdict", "note", "reviewer", "at")} for x in items[:REPORT_FEEDBACK_ITEMS]]}
+    return extras
 
 
 PREVIEW_LINES = 600
@@ -347,9 +623,11 @@ def report(ctx: Context) -> dict[str, Any]:
     conn = ctx.connect()
     try:
         a = analysis(ctx, conn)
-        lines = render_markdown(a.report).split(chr(10))
+        full = {**a.report, **_report_extras(conn, a)}
+        lines = render_markdown(full).split(chr(10))
         return {"preview": chr(10).join(lines[:PREVIEW_LINES]), "lines": len(lines), "truncated": len(lines) > PREVIEW_LINES,
-                "summary": a.report["summary"], "traceability": verify_traceability(conn, a.report)}
+                "summary": a.report["summary"], "traceability": verify_traceability(conn, a.report),
+                "plan": full.get("plan")}
     finally:
         conn.close()
 
@@ -358,12 +636,13 @@ def report_download(ctx: Context, fmt: str) -> tuple[bytes, str, str]:
     conn = ctx.connect()
     try:
         a = analysis(ctx, conn)
+        full = {**a.report, **_report_extras(conn, a)}
     finally:
         conn.close()
     if fmt == "md":
-        return render_markdown(a.report).encode("utf-8"), "text/markdown; charset=utf-8", "threatweaver-report.md"
+        return render_markdown(full).encode("utf-8"), "text/markdown; charset=utf-8", "threatweaver-report.md"
     if fmt == "json":
-        return json.dumps(a.report, indent=2).encode("utf-8"), "application/json; charset=utf-8", "threatweaver-report.json"
+        return json.dumps(full, indent=2).encode("utf-8"), "application/json; charset=utf-8", "threatweaver-report.json"
     raise ApiError(404, "unknown report format")
 
 
@@ -494,7 +773,8 @@ def advisory_draft(ctx: Context, body: dict[str, Any]) -> dict[str, Any]:
 
     def go(conn: sqlite3.Connection) -> int:
         a = analysis(ctx, conn)
-        title, text = advisory.draft_from_report(a.report)
+        # indicators a person judged to be a false alarm, or expected activity, are not advised on
+        title, text = advisory.draft_from_report(a.report, lifecycle.left_out_of_advisories(conn))
         return advisory.create_draft(conn, title, text, author)
 
     return _advisory_action(ctx, None, go)

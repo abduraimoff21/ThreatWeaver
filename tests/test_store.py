@@ -71,6 +71,29 @@ def test_url_host_is_linked_to_its_url_observation(conn):
     assert url_obs["parent_observation_id"] is None
 
 
+def test_email_domain_is_linked_to_its_email_observation_with_its_own_relation_kind(conn):
+    store.ingest_text(conn, "Sender: billing@invoice-update[.]example[.]org\n", "mail-1")
+    (domain_obs,) = store.provenance(conn, "domain", "invoice-update.example.org")
+    (email_obs,) = store.provenance(conn, "email", "billing@invoice-update.example.org")
+    assert domain_obs["parent_observation_id"] == email_obs["id"] and email_obs["parent_observation_id"] is None
+    assert email_obs["raw"] == "billing@invoice-update[.]example[.]org" and email_obs["defanged"]
+    (rel,) = conn.execute("SELECT kind FROM relations").fetchall()
+    assert rel["kind"] == "email_domain"
+    assert '"domain": "invoice-update.example.org"' in conn.execute("SELECT attrs FROM iocs WHERE type = 'email'").fetchone()["attrs"]
+
+
+def test_a_free_mail_address_is_stored_without_a_domain_indicator(conn):
+    store.ingest_text(conn, "backup contact scammer@gmail.com\n", "mail-1")
+    assert [r["type"] for r in conn.execute("SELECT type FROM iocs")] == ["email"]
+    assert count(conn, "relations") == 0
+
+
+def test_file_names_are_stored_with_their_extension(conn):
+    store.ingest_text(conn, 'Content-Disposition: attachment; filename="Invoice_4471.pdf.exe"\n', "mail-1")
+    (row,) = conn.execute("SELECT value, attrs FROM iocs WHERE type = 'filename'").fetchall()
+    assert row["value"] == "Invoice_4471.pdf.exe" and '"extension": "exe"' in row["attrs"] and "disguised" in row["attrs"]
+
+
 def test_ip_scope_is_stored(conn):
     store.ingest_text(conn, "10.0.0.5", "feed-a")
     row = conn.execute("SELECT attrs FROM iocs").fetchone()

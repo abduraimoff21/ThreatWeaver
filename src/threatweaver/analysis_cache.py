@@ -34,7 +34,7 @@ from .triage import RuleHit, Verdict
 
 FORMAT = 1
 SUFFIX = ".analysis.gz"
-_MODULES = ("extract", "normalize", "defang", "files", "tlds", "models", "correlate", "triage", "report", "store")
+_MODULES = ("extract", "normalize", "defang", "files", "tlds", "models", "correlate", "triage", "report", "store", "attack", "attack_data")
 _signature: str | None = None
 
 

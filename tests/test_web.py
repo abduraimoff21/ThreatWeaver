@@ -162,8 +162,13 @@ def test_front_end_never_builds_html_from_data():
         assert forbidden not in js, forbidden
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     assert not re.search(r"<script(?![^>]*\bsrc=)", html) and "onclick=" not in html and "style=" not in html
-    # the only URL in the script is the SVG namespace identifier; nothing is fetched from elsewhere
-    assert re.findall(r"https?://[^\s'\"]+", js) == ["http://www.w3.org/2000/svg"]
+    # the only URLs in the script are the SVG namespace identifier and the one site a technique link may point to
+    # (checked before a link is made; a person opens it, the script never fetches it)
+    assert re.findall(r"https?://[^\s'\"]+", js) == ["http://www.w3.org/2000/svg", "https://attack.mitre.org/"]
+    # ... and every request the script makes goes to this server: a path built in the script, never an address
+    assert re.findall(r"fetch\(([^,)]+)", js) == ["path", "path"]
+    assert re.findall(r"xhr\.open\('POST', ('/[^']*')", js) == ["'/api/upload?name='"]
+    assert not re.search(r"\b(WebSocket|EventSource|sendBeacon)\b", js)
 
 
 # ------------------------------------------------------------- data endpoints

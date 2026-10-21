@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import advisory, analysis_cache, store
+from .. import advisory, analysis_cache, attack, store
 from ..correlate import RULES
 from ..defang import defang
 from ..extract import extract
@@ -223,7 +223,7 @@ def overview(ctx: Context) -> dict[str, Any]:
             rule_counts[link.rule] = rule_counts.get(link.rule, 0) + 1
         return {
             "database": Path(ctx.db_path).name if ctx.db_path != ":memory:" else ":memory:",
-            "summary": a.report["summary"], "link_rules": rule_counts,
+            "summary": a.report["summary"], "link_rules": rule_counts, "attack": _attack_overview(a.report["attack"]),
             "sources": [s for s in sources if s["kind"] != "feed"], "feeds": feeds,
             "generated_at": a.report["generated_at"],
             "empty": a.report["summary"]["indicators"] == 0,
@@ -233,11 +233,18 @@ def overview(ctx: Context) -> dict[str, Any]:
         conn.close()
 
 
+def _attack_overview(section: dict[str, Any]) -> dict[str, Any]:
+    """The report's ATT&CK section, cut down to what the Overview page shows."""
+    return {"framework": section["framework"], "copyright": section["copyright"], "notice": section["notice"],
+            "patterns": attack.patterns_view({pid: p["indicators"] for pid, p in section["patterns"].items()}),
+            "by_tactic": section["by_tactic"]}
+
+
 CASES_PAGE = 200
 
 
 def _is_quiet(case: dict[str, Any]) -> bool:
-    return not case["links"] and case["max_level"] == "info"
+    return not case["links"] and case["max_level"] == "info" and not case.get("attack")
 
 
 def cases(ctx: Context, query: dict[str, str] | None = None) -> dict[str, Any]:
@@ -280,6 +287,7 @@ def case_detail(ctx: Context, case_id: str) -> dict[str, Any]:
             "case_id": case_id, "max_level": case["max_level"], "max_score": case["max_score"],
             "indicators": [_row(i, case_id) for i in shown], "indicators_total": len(case["indicators"]),
             "links": [_link_row(l) for l in case["links"][:CASE_LINKS_MAX]], "links_total": len(case["links"]),
+            "attack": attack.roll_view(case.get("attack")),
         }
     finally:
         conn.close()
@@ -297,6 +305,9 @@ def indicators(ctx: Context, query: dict[str, str]) -> dict[str, Any]:
         kind, level = query.get("type", ""), query.get("level", "")
         needle = query.get("q", "").strip().lower()
         source = query.get("source", "").strip().lower()
+        pattern = query.get("attack", "").strip()
+        if pattern and pattern not in attack.BY_ID:
+            raise ApiError(400, "unknown ATT&CK pattern")
         matches = []
         for ind in a.indicators.values():
             if kind and ind["type"] != kind:
@@ -304,6 +315,8 @@ def indicators(ctx: Context, query: dict[str, str]) -> dict[str, Any]:
             if level and ind["level"] != level:
                 continue
             if source and not any(source in s.lower() for s in ind["sources"]):
+                continue
+            if pattern and not any(f["pattern"] == pattern for f in ind.get("attack", ())):
                 continue
             if needle and needle not in ind["value"].lower() and needle not in defang(ind["value"]).lower():
                 continue
@@ -315,7 +328,8 @@ def indicators(ctx: Context, query: dict[str, str]) -> dict[str, Any]:
         for ind in matches[offset:offset + limit]:  # rows are built for the visible page only
             row = _row(ind, a.case_of[ind["id"]])
             row.update(sightings=ind["sightings_total"], sources=ind["sources"],
-                       feed_matches=ind["feed_matches_total"], rules=[r["rule"] for r in ind["rules"]])
+                       feed_matches=ind["feed_matches_total"], rules=[r["rule"] for r in ind["rules"]],
+                       attack=[attack.BY_ID[f["pattern"]].title for f in ind.get("attack", ())])
             rows.append(row)
         return {"total": len(matches), "offset": offset, "limit": limit, "rows": rows}
     finally:
@@ -360,6 +374,7 @@ def indicator_detail(ctx: Context, ioc_id: int) -> dict[str, Any]:
             rules=[{"rule": r["rule"], "points": r["points"], "reason": _defang_ioc_text(r["reason"]),
                     "description": RULE_DESCRIPTIONS.get(r["rule"], ""), "evidence_total": r["evidence_total"]} for r in ind["rules"]],
             sightings=sightings, sightings_total=total, feed_matches=matches, links=links, links_total=len(mine),
+            attack=[attack.finding_view(f) for f in ind.get("attack", ())],
         )
         return row
     finally:

@@ -98,6 +98,48 @@ function table(headers, rows, onRow) {
 function cell(text, cls) { return { text, class: cls }; }
 function nodeCell(node, cls) { return { node, class: cls }; }
 
+/* ---------- MITRE ATT&CK hints ----------
+ * The server sends names and addresses from its own fixed table; a link is only made when it points at attack.mitre.org. */
+const ATTACK_SITE = 'https://attack.mitre.org/';
+const basisTag = (x) => h('span', { class: 'tag basis ' + x.basis, title: 'What this hint is based on' }, x.basis_label);
+function attackLink(t) {
+  const ok = typeof t.url === 'string' && t.url.startsWith(ATTACK_SITE);
+  return h(ok ? 'a' : 'span', ok ? { class: 'chip', href: t.url, target: '_blank', rel: 'noopener noreferrer', title: 'Open this page on attack.mitre.org' } : { class: 'chip' }, h('b', {}, t.id), ' ', t.name);
+}
+function tacticGroups(groups) {
+  return groups.map((g) => h('div', { class: 'tactic' }, h('div', { class: 'tname' }, g.tactic),
+    h('div', { class: 'chips' }, g.techniques.map((t) => h('span', {}, attackLink(t), t.indicators ? h('span', { class: 'small muted' }, ` ×${t.indicators.toLocaleString()}`) : null)))));
+}
+function softwareBlock(sw) {
+  return h('details', {}, h('summary', {}, `ATT&CK lists ${sw.techniques_total} techniques for ${sw.name}`),
+    h('p', { class: 'small muted' }, 'Everything ATT&CK records about this malware family in general, not necessarily what happened here. ', attackLink({ id: sw.id, name: sw.name + ' on attack.mitre.org', url: sw.url })),
+    tacticGroups(sw.by_tactic));
+}
+function attackFindings(list) {
+  if (!list || !list.length) return null;
+  return [h('h3', {}, 'What this could be (MITRE ATT&CK)'),
+    h('p', { class: 'small muted' }, 'Possibilities to check, not findings. Each says what it is based on.'),
+    list.map((f) => h('div', { class: 'panel attack' },
+      h('div', {}, h('b', {}, f.title), ' ', basisTag(f)),
+      h('p', { class: 'small' }, f.meaning),
+      h('p', { class: 'small muted' }, 'Why it was suggested: ' + f.why),
+      h('div', { class: 'small muted' }, 'Tactics: ' + [...new Set(f.techniques.flatMap((t) => t.tactics))].join(', ')),
+      h('div', { class: 'chips' }, f.techniques.map(attackLink)),
+      h('details', {}, h('summary', {}, 'What to check next'), h('ul', {}, f.check.map((c) => h('li', {}, c)))),
+      f.software.map(softwareBlock)))];
+}
+function attackSummary(a, heading, onPattern) {
+  if (!a || !a.patterns.length) return null;
+  return h('div', { class: 'panel' }, h('h2', {}, heading),
+    a.notice ? h('p', { class: 'small muted' }, a.notice) : null,
+    a.patterns.map((p) => h('div', { class: 'prow' },
+      onPattern ? h('button', { class: 'link', onclick: () => onPattern(p) }, p.title) : h('b', {}, p.title), ' ', basisTag(p),
+      h('span', { class: 'mono' }, ` ${p.indicators.toLocaleString()}`))),
+    h('h3', { style: 'margin-top:.9rem' }, 'Tactics and techniques suggested'),
+    tacticGroups(a.by_tactic),
+    a.framework ? h('p', { class: 'small muted' }, `${a.framework}. ${a.copyright}`) : null);
+}
+
 /* ---------- indicator drawer ---------- */
 function closeDrawer() { $('.drawer-back')?.remove(); $('.drawer')?.remove(); }
 async function openIndicator(id) {
@@ -109,6 +151,7 @@ async function openIndicator(id) {
     h('div', { class: 'toolbar', style: 'justify-content:space-between' }, h('div', {}, typeTag(d.type), badge(d.level), ' ', h('span', { class: 'muted' }, `score ${d.score}`)), close),
     h('h2', { class: 'mono' }, val(d)),
     h('p', {}, d.suggested_action),
+    d.attack && d.attack.length && (d.level === 'info' || d.level === 'low') ? h('p', { class: 'small' }, 'The triage rules score this low, but it matches one or more MITRE ATT&CK possibilities: see "What this could be" below.') : null,
     d.scope && d.scope !== 'global' ? h('p', { class: 'small muted' }, `Address scope: ${d.scope}`) : null,
     h('p', { class: 'small' }, 'Case: ', h('button', { class: 'link', onclick: () => { closeDrawer(); location.hash = '#/case/' + d.case_id; } }, d.case_id)),
     h('h3', {}, 'Why this level'),
@@ -116,6 +159,7 @@ async function openIndicator(id) {
       h('span', { class: 'pts' }, (r.points >= 0 ? '+' : '') + r.points), ' ', h('b', {}, r.rule), ' ', h('span', { class: 'muted' }, r.description),
       h('div', {}, r.reason), h('div', { class: 'small muted' }, `${r.evidence_total} evidence item(s)`)))
       : h('p', { class: 'muted' }, 'No triage rule fired for this indicator.'),
+    attackFindings(d.attack),
     d.feed_matches.length ? h('h3', {}, 'Public feed records') : null,
     d.feed_matches.map((m) => h('div', { class: 'panel' },
       h('b', {}, m.feed), ' ', h('span', { class: 'muted' }, m.via === 'exact' ? 'lists this indicator' : 'lists a URL hosted here: ' + m.listed_url),
@@ -551,6 +595,7 @@ async function viewOverview() {
       h('div', { class: 'toolbar' }, h('button', { onclick: () => (location.hash = '#/cases') }, 'Open cases'), h('button', { onclick: () => (location.hash = '#/graph') }, 'Open link graph'))),
     addDataPanel(),
     feedsPanel(o.feeds)));
+  root.append(attackSummary(o.attack, 'What this activity could be (MITRE ATT&CK)', (p) => { state.attackFilter = p.pattern; location.hash = '#/indicators'; }));
   root.append(h('div', { class: 'panel' }, h('h2', {}, 'Your sources'),
     o.sources.length ? [table(['Name', 'Indicators', 'Added', 'SHA-256', ''], o.sources.map((x) => ({ data: x, cells: [cell(x.name), cell(String(x.indicators)), cell(x.ingested_at), cell(x.sha256.slice(0, 12), 'val'), nodeCell(removeSourceButton(x))] }))),
       h('p', { class: 'small muted' }, SOURCE_HINT)]
@@ -746,29 +791,33 @@ async function viewCase(id) {
     h('div', { class: 'panel' }, h('h2', {}, 'Indicators'),
       c.indicators_total > c.indicators.length ? h('p', { class: 'small muted' }, `Showing the ${c.indicators.length} highest-scoring of ${c.indicators_total.toLocaleString()} indicators in this case. Search all of them on the Indicators page.`) : null,
       table(['Level', 'Score', 'Type', 'Indicator'], c.indicators.map((i) => ({ data: i, cells: [nodeCell(badge(i.level)), cell(String(i.score)), cell(i.type), cell(val(i), 'val')] })), (i) => openIndicator(i.id))),
+    attackSummary(c.attack, 'What this case could be (MITRE ATT&CK)', null),
     h('div', { class: 'panel' }, h('h2', {}, 'How they connect'), drawGraph(g)));
 }
 
 async function viewIndicators() {
-  const f = { q: '', type: '', level: '', source: '', offset: 0 };
+  const f = { q: '', type: '', level: '', source: '', attack: state.attackFilter || '', offset: 0 };
+  state.attackFilter = '';
   const results = h('div', {});
+  const attackNote = h('div', { class: 'small' });
   const qInput = h('input', { type: 'search', placeholder: 'Search value...', 'aria-label': 'Search', oninput: debounce(() => { f.q = qInput.value; f.offset = 0; load(); }, 250) });
   const typeSel = h('select', { 'aria-label': 'Type', onchange: () => { f.type = typeSel.value; f.offset = 0; load(); } }, h('option', { value: '' }, 'All types'), ['ipv4', 'ipv6', 'domain', 'url', 'email', 'filename', 'md5', 'sha1', 'sha256'].map((t) => h('option', { value: t }, t)));
   const lvlSel = h('select', { 'aria-label': 'Level', onchange: () => { f.level = lvlSel.value; f.offset = 0; load(); } }, h('option', { value: '' }, 'All levels'), LEVELS.map((l) => h('option', { value: l }, l)));
   const srcInput = h('input', { type: 'search', placeholder: 'Source name...', 'aria-label': 'Source', oninput: debounce(() => { f.source = srcInput.value; f.offset = 0; load(); }, 250) });
   async function load() {
-    const qs = new URLSearchParams({ q: f.q, type: f.type, level: f.level, source: f.source, offset: f.offset, limit: 50 });
+    const qs = new URLSearchParams({ q: f.q, type: f.type, level: f.level, source: f.source, attack: f.attack, offset: f.offset, limit: 50 });
     const d = await guarded(() => api('/api/indicators?' + qs));
     if (!d) return;
+    attackNote.replaceChildren(...(f.attack ? ['Only indicators with one particular MITRE ATT&CK hint. ', h('button', { class: 'link', onclick: () => { f.attack = ''; f.offset = 0; load(); } }, 'Show all')] : []));
     results.replaceChildren(
       h('p', { class: 'small muted' }, `${d.total} indicator(s)`),
-      d.rows.length ? table(['Level', 'Score', 'Type', 'Indicator', 'Seen', 'Sources', 'Feeds'], d.rows.map((i) => ({ data: i, cells: [nodeCell(badge(i.level)), cell(String(i.score)), cell(i.type), cell(val(i), 'val'), cell(String(i.sightings)), cell(i.sources.join(', ')), cell(i.feed_matches ? String(i.feed_matches) : '-')] })), (i) => openIndicator(i.id)) : empty('Nothing matches these filters.'),
+      d.rows.length ? table(['Level', 'Score', 'Type', 'Indicator', 'Seen', 'Sources', 'Feeds', 'Could be'], d.rows.map((i) => ({ data: i, cells: [nodeCell(badge(i.level)), cell(String(i.score)), cell(i.type), cell(val(i), 'val'), cell(String(i.sightings)), cell(i.sources.join(', ')), cell(i.feed_matches ? String(i.feed_matches) : '-'), cell(i.attack.join(', '), 'small')] })), (i) => openIndicator(i.id)) : empty('Nothing matches these filters.'),
       h('div', { class: 'toolbar', style: 'margin-top:.75rem' },
         h('button', { disabled: f.offset === 0, onclick: () => { f.offset = Math.max(0, f.offset - 50); load(); } }, 'Previous'),
         h('button', { disabled: f.offset + 50 >= d.total, onclick: () => { f.offset += 50; load(); } }, 'Next')));
   }
   load();
-  return h('div', {}, h('div', { class: 'panel toolbar' }, qInput, typeSel, lvlSel, srcInput), results);
+  return h('div', {}, h('div', { class: 'panel toolbar' }, qInput, typeSel, lvlSel, srcInput), attackNote, results);
 }
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 

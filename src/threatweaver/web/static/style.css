@@ -153,3 +153,14 @@ details { margin-top: .75rem; }
 .job.done { border-left-color: var(--ok); } .job.error { border-left-color: var(--bad); }
 .progress { background: var(--panel-2); border-radius: 5px; height: 10px; overflow: hidden; margin-top: .4rem; }
 .progress > div { height: 100%; background: var(--accent); transition: width .3s; }
+
+/* MITRE ATT&CK hints */
+.panel.attack { background: var(--panel-2); }
+.chips { display: flex; flex-wrap: wrap; gap: .35rem .5rem; margin: .35rem 0; }
+.chip { display: inline-block; font-size: .82rem; padding: .1rem .5rem; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
+a.chip { color: var(--accent); }
+.tactic { margin: .5rem 0; }
+.tactic .tname { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.tag.basis.feed { border-color: var(--high-bg); color: var(--text); }
+.tag.basis.shape, .tag.basis.log { border-color: var(--medium-bg); color: var(--text); }
+.prow { margin: .3rem 0; }

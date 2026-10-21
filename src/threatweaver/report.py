@@ -19,10 +19,10 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from . import __version__, store
+from . import __version__, attack, store
 from .correlate import CorrelationResult, Evidence, clusters, correlate
 from .defang import defang
-from .triage import LEVELS, RULE_DESCRIPTIONS, Verdict, triage
+from .triage import LEVELS, NON_ROUTABLE, RULE_DESCRIPTIONS, Verdict, triage
 
 NOTICE = (
     "DRAFT FOR ANALYST REVIEW. Triage levels are suggestions from simple rules, not findings. "
@@ -85,10 +85,14 @@ def build_report(
         sight_total[r["ioc_id"]] = sight_total.get(r["ioc_id"], 0) + r["sightings"]
         sight_sources.setdefault(r["ioc_id"], []).append(sources[r["source_id"]]["name"])
     sightings: dict[int, list[dict[str, Any]]] = {}
+    log_lines: dict[int, list[str]] = {}  # stored log lines, read only to suggest ATT&CK hints; never put in the report
     for ioc_id in sorted(sight_total):
+        wants_lines = iocs[ioc_id]["type"] not in attack.HASH_TYPES
         rows = conn.execute(
-            "SELECT id, source_id, line_no, raw, defanged, parent_observation_id FROM observations "
-            "WHERE ioc_id = ? ORDER BY id LIMIT ?", (ioc_id, MAX_SIGHTINGS)).fetchall()
+            "SELECT id, source_id, line_no, raw, defanged, parent_observation_id" + (", context" if wants_lines else "") +
+            " FROM observations WHERE ioc_id = ? ORDER BY id LIMIT ?", (ioc_id, MAX_SIGHTINGS)).fetchall()
+        if wants_lines:
+            log_lines[ioc_id] = [o["context"] for o in rows[:attack.MAX_LINES] if o["context"]]
         sightings[ioc_id] = [{
             "observation_id": o["id"], "source": sources[o["source_id"]]["name"], "line": o["line_no"],
             "raw": o["raw"], "defanged": bool(o["defanged"]), "derived_from_url": o["parent_observation_id"] is not None,
@@ -117,11 +121,32 @@ def build_report(
         links_by_ioc[l.a].append(l)
         links_by_ioc[l.b].append(l)
 
+    def attack_hints(i: int) -> list[dict[str, Any]]:
+        """MITRE ATT&CK possibilities for one indicator (see attack.py); empty for most."""
+        v, ioc_type = verdicts[i], iocs[i]["type"]
+        email = disguised_file = risky_domain = False
+        if ioc_type in ("email", "filename"):  # only these read their neighbours
+            for l in links_by_ioc.get(i, ()):
+                other = l.b if l.a == i else l.a
+                if l.rule == "same_line":
+                    email = email or iocs[other]["type"] == "email"
+                    disguised_file = disguised_file or (iocs[other]["type"] == "filename" and "disguised" in json.loads(iocs[other]["attrs"]))
+                elif l.rule == "email_domain" and other in verdicts and verdicts[other].level == "high":
+                    risky_domain = True
+        return attack.assess(attack.Facts(
+            type=ioc_type, value=iocs[i]["value"], disguised=ioc_type == "filename" and "disguised" in json.loads(iocs[i]["attrs"]),
+            rules={h.rule: h.points for h in v.hits}, matches=matches_for.get(i, ()), sightings=sight_total.get(i, 0),
+            lines=log_lines.get(i, ()), linked_email=email, linked_disguised_file=disguised_file, linked_risky_domain=risky_domain,
+            internal=ioc_type in ("ipv4", "ipv6") and json.loads(iocs[i]["attrs"]).get("scope", "") in NON_ROUTABLE))
+
     local = sorted(verdicts)
     cases = []
+    hints_everywhere: list[list[dict[str, Any]]] = []
     for members in clusters(local, result.links):
         member_set = set(members)
         ordered = sorted(members, key=lambda i: (-verdicts[i].score, iocs[i]["type"], iocs[i]["value"]))
+        hints = {i: attack_hints(i) for i in ordered}
+        hints_everywhere.extend(h for h in hints.values() if h)
         case_id = "TW-" + hashlib.sha256(
             "\n".join(sorted(f"{iocs[i]['type']} {iocs[i]['value']}" for i in members)).encode()
         ).hexdigest()[:8]
@@ -141,10 +166,13 @@ def build_report(
                 "sightings": sightings.get(i, []),
                 "feed_matches_total": len(matches_for.get(i, [])),
                 "feed_matches": matches_for.get(i, [])[:MAX_FEED_MATCHES],
+                **({"attack": hints[i]} if hints[i] else {}),  # only where there is something to say
             } for i in ordered],
             "links": [_link_dict(l, ioc_ref) for l in sorted(
                 {id(l): l for i in members for l in links_by_ioc.get(i, ())}.values(), key=lambda l: link_position[id(l)])],
         })
+        if any(hints.values()):
+            cases[-1]["attack"] = attack.rollup(h for h in hints.values() if h)
     cases.sort(key=lambda c: (-c["max_score"], c["case_id"]))
 
     counts = Counter(v.level for v in verdicts.values())
@@ -162,6 +190,7 @@ def build_report(
         "sources": [{"id": s["id"], "name": s["name"], "kind": s["kind"], "sha256": s["content_sha256"],
                      "ingested_at": s["ingested_at"]} for s in sources.values()],
         "rule_catalog": RULE_DESCRIPTIONS,
+        "attack": attack.summary(attack.rollup(hints_everywhere)),
         "cases": cases,
     }
 
@@ -174,8 +203,9 @@ def _safe_field(key: str, value: Any) -> Any:
 
 
 def _is_quiet(case: dict[str, Any]) -> bool:
-    """A single indicator, nothing linked to it, and no triage rule fired."""
-    return not case["links"] and case["max_level"] == "info" and len(case["indicators"]) == 1 and not case["indicators"][0]["rules"]
+    """A single indicator, nothing linked to it, no triage rule fired and no ATT&CK hint to show."""
+    return (not case["links"] and case["max_level"] == "info" and len(case["indicators"]) == 1
+            and not case["indicators"][0]["rules"] and not case.get("attack"))
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -213,6 +243,20 @@ def render_markdown(report: dict[str, Any]) -> str:
     if s["skipped_noisy_lines"]:
         out += ["", f"{s['skipped_noisy_lines']} line(s) with too many indicators were not used for correlation."]
 
+    att = report.get("attack") or {}
+    used = [(pid, p) for pid, p in att.get("patterns", {}).items() if p["indicators"]]
+    if used:
+        rank = {"feed": 0, "shape": 1, "log": 2, "volume": 3}
+        out += ["", "## MITRE ATT&CK view", "", att["notice"], "",
+                "| Could be | Based on | Indicators |", "|---|---|---|"]
+        out += [f"| {p['title']} (`{pid}`) | {p['basis_label'].lower()} | {p['indicators']} |"
+                for pid, p in sorted(used, key=lambda x: (rank[x[1]["basis"]], -x[1]["indicators"], x[0]))]
+        out += ["", "| Tactic | Techniques (indicators it was suggested for) |", "|---|---|"]
+        out += [f"| {g['tactic']} | " + "; ".join(f"`{t['id']}` {t['name']} ({t['indicators']})" for t in g["techniques"]) + " |"
+                for g in att["by_tactic"]]
+        out += ["", "Each technique's page, with how it works and how to detect it, is at " + defang(att["source"]) +
+                "/techniques/<id>/ (shown defanged like every address in this report; a dot in a sub-technique id becomes a slash)."]
+
     detailed = [c for c in report["cases"] if not _is_quiet(c)]
     quiet = [c for c in report["cases"] if _is_quiet(c)]
     for case in detailed:
@@ -227,6 +271,10 @@ def render_markdown(report: dict[str, Any]) -> str:
                     out.append(f"- `{r['rule']}` {r['points']:+d}: {r['reason']} {refs(r['evidence'], r.get('evidence_total'))}".rstrip())
             else:
                 out.append("- No triage rule fired.")
+            for hint in i.get("attack", ()):
+                pat, techs = att["patterns"][hint["pattern"]], att["techniques"]
+                out.append(f"- ATT&CK `{hint['pattern']}` {pat['title']} ({pat['basis_label'].lower()}): {hint['why']} "
+                           "Techniques to consider: " + ", ".join(f"`{t}` {techs[t]['name']}" for t in hint["techniques"]) + ".")
             for sg in i["sightings"]:
                 raw = sg["raw"] if sg["defanged"] else defang(sg["raw"])
                 note = " (host of a URL)" if sg["derived_from_url"] else ""
@@ -257,6 +305,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             "Links come from five rules only (url_host, email_domain, same_line, hostname_ip, shared_family); same_line means the same line of the same source and is evidence of co-occurrence, not of causation; hostname_ip relies on the naming convention of the host name and is a strong hint, not proof, that both refer to the same machine.",
             "Feed data is a point-in-time snapshot of public lists and can be stale or wrong. Absence from a feed is not evidence of safety.",
             ""]
+    if att:
+        out += [f"{att['framework']} names and identifiers. {att['notice']}", "", att["copyright"], ""]
     return "\n".join(out)
 
 

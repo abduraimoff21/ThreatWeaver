@@ -38,6 +38,7 @@ ThreatWeaver is a research prototype. It reads logs and reports, finds IPs, doma
 | **Enrich** | Matches against two public feeds: [Feodo Tracker](https://feodotracker.abuse.ch/) (botnet C2 IPs) and [URLhaus](https://urlhaus.abuse.ch/) (malware URLs). |
 | **Correlate** | Five transparent rules link related indicators into cases. Each link names its rule and cites its evidence. |
 | **Triage** | Eleven readable rules produce a suggested level (high / medium / low / info) with the reasons and evidence behind it. |
+| **MITRE ATT&CK hints** | For each indicator, the kinds of attack it could belong to, the ATT&CK tactics and techniques they use, and what to check next. Possibilities to check, not findings. |
 | **Report** | Markdown and JSON investigation reports, defanged and fully traceable, with a built-in verifier. |
 | **Test detection rules** | A harness that checks Sigma and YARA rules against labeled positive and negative samples. |
 | **Publish advisories safely** | A review workflow with a confidentiality check, a separate reviewer and a typed approval, writing only local files. |
@@ -129,9 +130,9 @@ It prints a link like `http://127.0.0.1:8765/?token=...` and opens your browser.
 
 | Page | What you can do |
 |------|-----------------|
-| **Overview** | Counts, a priority chart, **drag and drop log files** (or paste text) to add them, **download feeds** with one click, and see your sources, each with a **Remove** button. |
+| **Overview** | Counts, a priority chart, **what the activity could be (MITRE ATT&CK)**, **drag and drop log files** (or paste text) to add them, **download feeds** with one click, and see your sources, each with a **Remove** button. |
 | **Cases** | Groups of connected indicators, highest priority first. Quiet single-indicator cases are hidden unless you ask. |
-| **Indicators** | Search and filter by value, type, level or source. Click a row for the full explanation. |
+| **Indicators** | Search and filter by value, type, level, source or MITRE ATT&CK hint. Click a row for the full explanation, including what it could be and what to check next. |
 | **Link graph** | An interactive picture of what is connected. **Scroll or pinch to zoom, drag the background to pan**, drag a node to move it, hover one to light up only what it connects to, and use *Find* and *Full screen*. Shape shows the type, colour shows the level, line style shows why two things are linked, and a faint circle groups a case (click its caption to open it). Filters choose the priority to start from, how many indicators to draw, which link types to show and how many links to draw per indicator. Click a node for details. |
 | **Report** | The traceability check, the report preview, and downloads (Markdown and JSON). |
 | **Advisories** | Draft from public evidence, run the confidentiality check, submit, review, approve and write the file, with the audit log. |
@@ -278,6 +279,41 @@ Indicators connected by links of weight 2 or more form a **case**. Feed matches 
 
 Levels: **high** at 50 or more, **medium** at 25, **low** at 10, otherwise **info**. The thresholds are judgement calls, not calibrated values.
 
+### MITRE ATT&CK hints
+
+Beside each triage level, the dashboard and the report say what kind of attack an indicator could belong to, which [MITRE ATT&CK](https://attack.mitre.org) tactics and techniques that kind of attack uses, and what an analyst could check next. These are **possibilities to check, not findings**: ThreatWeaver reads only feed listings, the shape of an indicator and a few stored log lines, so it can say where to look but not what happened. They do not change the triage score. Where they show: the **Overview** (what the whole data could be; click one to list its indicators), an **indicator's** details (why it was suggested, the techniques as links, *What to check next*), a **case** page, the **Indicators** list (a *Could be* column and filter), and a *MITRE ATT&CK view* in the report (Markdown and JSON).
+
+Each suggestion says what it is based on, strongest first: **public feed** (Feodo Tracker or URLhaus lists it), **what the indicator is** (a disguised file name, an e-mail address tied to a risky domain), **words in stored log lines** (a scanner's name, failed-login messages, an exploit string) and **volume only** (the weakest: it only says the indicator is very busy).
+
+| Id | Could be | Based on | Fires when | Techniques |
+|----|----------|----------|------------|------------|
+| `AT-01` | Botnet command-and-control server | public feed | Exact match in Feodo Tracker (any status) | `T1071` |
+| `AT-02` | Link that serves malware | public feed | Exact match in URLhaus | `T1105`, `T1204.001`, `T1189` |
+| `AT-03` | Server that hosts malware downloads | public feed | Host of a URL that URLhaus lists | `T1608.001`, `T1584`, `T1583` |
+| `AT-04` | Program disguised as a document | what the indicator is | A file name that hides an executable behind a document extension | `T1036.007`, `T1204.002` |
+| `AT-05` | E-mail with a disguised attachment | what the indicator is | That file name and an e-mail address on the same line (both get it) | `T1566.001`, `T1036.007`, `T1204.002` |
+| `AT-06` | E-mail address tied to a risky domain | what the indicator is | An e-mail address whose domain is high risk | `T1566`, `T1583.001` |
+| `AT-07` | Repeated failed logins | words in stored log lines | 3 or more of the stored lines hold failed-login messages (Failed password, Invalid user, authentication failure ...) | `T1110`, `T1110.001` |
+| `AT-08` | Port or host scanner | words in stored log lines | The name of a network scanner (Nmap, masscan, zmap, zgrab) | `T1595.001`, `T1595.002` (inside the network: `T1046`) |
+| `AT-09` | Web vulnerability scanner | words in stored log lines | The name of a web vulnerability scanner (Nikto, Nuclei, WPScan, Nessus, OpenVAS, Acunetix ...) | `T1595.002` (inside the network: `T1046`) |
+| `AT-10` | File and directory guessing tool | words in stored log lines | The name of a directory-guessing tool (gobuster, dirbuster, ffuf, wfuzz ...) | `T1595.003` |
+| `AT-11` | Password-guessing tool | words in stored log lines | The name of a password-guessing tool (Hydra, Patator, Ncrack, Medusa) | `T1110`, `T1110.001` |
+| `AT-12` | SQL injection attempt | words in stored log lines | sqlmap, or typical SQL injection text (UNION SELECT, ' OR '1'='1, information_schema) | `T1190` (inside the network: `T1210`) |
+| `AT-13` | Exploit string against a public service | words in stored log lines | Path traversal, /etc/passwd, a Log4Shell string or a Shellshock string | `T1190` (inside the network: `T1210`) |
+| `AT-14` | Encoded or hidden PowerShell | words in stored log lines | PowerShell with an encoded command, FromBase64String, or a hidden window running a download | `T1059.001`, `T1027` |
+| `AT-15` | Command that downloads a file | words in stored log lines | certutil -urlcache, bitsadmin /transfer, Invoke-WebRequest, Net.WebClient downloads, curl or wget piped into a shell | `T1105`, `T1059` |
+| `AT-16` | System tool used to run remote content | words in stored log lines | mshta or regsvr32 loading a remote script | `T1218.005`, `T1218.010` |
+| `AT-17` | Probing for files that are not there | words in stored log lines | 5 or more stored lines about missing files or directories (File does not exist, Directory index forbidden) | `T1595.003` |
+| `AT-18` | Connection probes that never start a real session | words in stored log lines | 3 or more stored lines about dropped or malformed connections (Did not receive identification string ...) | `T1595` (inside the network: `T1046`) |
+| `AT-19` | Very heavy repeat activity (volume only) | volume only (weakest) | 1,000 or more sightings (TW-T10 at 25 points or more) and no log text that explains them | `T1595`, `T1110`, `T1071`, `T1498`, `T1499` (inside the network: `T1046`, `T1110`, `T1071`, `T1498`, `T1499`) |
+
+- **Malware families.** When a feed names a family ATT&CK also describes (Dridex, Emotet, IcedID, QakBot, TrickBot, Bazar; any spelling, such as Heodo or QuakBot), the page also offers *ATT&CK lists N techniques for Emotet*, grouped by tactic. That is everything ATT&CK records about the family in general, not what happened in your data.
+- **Log lines.** At most the first 20 stored lines of each indicator are read (hashes are skipped), and some patterns need several of them. A line names several addresses, so for patterns about acting on others (scanning, guessing, exploiting) an IPv4 address only counts on lines where it comes **first**, the usual place for the source in firewall, flow and web logs. Log text is read to find the hints and is never copied into the report.
+- **Private addresses.** An address in a private range that scans or exploits is already inside the network, so it gets the inside-the-network technique (for example Network Service Discovery instead of Active Scanning) and the page says so.
+- **Data.** The names, identifiers and tactic membership come from `attack_data.py`: ATT&CK Enterprise v20, read from attack.mitre.org on 2026-10-21 (no descriptions are copied). ATT&CK changes: v20 splits Defense Evasion into *Stealth* and *Defense Impairment*, and the names above follow v20. To update, re-read the tactic pages and the software pages of the new version into `attack_data.py`; `tests/test_attack.py` checks that every technique a pattern or family uses exists. The dashboard makes no request to attack.mitre.org: a technique is a link that your browser opens when you click it.
+- **Measured.** Reading the stored lines adds about 40 microseconds per indicator (0.3 s for the 6,900 indicators of two Loghub logs, where it flagged 1,327 indicators for repeated failed logins in the OpenSSH log).
+- MITRE's notice: "© 2026 The MITRE Corporation. This work is reproduced and distributed with the permission of The MITRE Corporation." ATT&CK does not enumerate every possible behaviour, and an attack can be present without being suggested here.
+
 ### Database tables
 
 `sources` (every ingested file or feed snapshot, pinned by SHA-256) · `iocs` (unique type + value) · `observations` (each sighting with source, line, offsets, original text) · `ioc_source_stats` (sightings per indicator and source, kept up to date while ingesting so analysis does not re-read every sighting) · `meta` (a counter that changes on every removal) · `intel` (feed records with the raw record) · `relations` (URL to host, e-mail address to domain; removed together with their source) · `links` (correlation cache) · `advisories` and `advisory_events`.
@@ -303,7 +339,7 @@ Levels: **high** at 50 or more, **medium** at 25, **low** at 10, otherwise **inf
 ## Testing and measured results
 
 ```bash
-python -m pytest                 # 482 tests (481 pass; 1 needs yara-python and is skipped without it)
+python -m pytest                 # 545 tests (544 pass; 1 needs yara-python and is skipped without it)
 python -m threatweaver evaluate  # extraction precision / recall
 python -m threatweaver evaluate --scenario
 ```
@@ -364,6 +400,12 @@ What the numbers cannot tell you is how it behaves on your logs. Run it on a cas
 - The Report page shows a preview of the first 600 lines; the download buttons give the whole report.
 - Verified in the Claude desktop app's built-in browser (dark theme). The link graph (zoom, pan, hover, find, full screen, touch pinch) was also driven in desktop Chrome, light and dark; other browsers have not been visually checked.
 
+**MITRE ATT&CK hints**
+- They are possibilities, not findings, and not complete: a pattern is a few words or a feed listing, so an attack that does not use those words is not suggested, and a harmless tool (an authorised scanner, an administrator's PowerShell) can be.
+- Only the first 20 stored lines of an indicator are read. An address that scans late in a long log, after 20 harmless lines, gets no log-based hint. An address is treated as the source only if it is the first address on the line; logs that put the destination first will point at the wrong side.
+- Lines stored by an older version have no log text, so only the feed and indicator-shape hints appear until the file is added again.
+- The Overview counts every indicator a hint was suggested for, so a log in which every address both scans and is scanned flags nearly all of them. The page lists the strongest evidence first.
+
 **Rules harness**
 - The Sigma evaluator supports a documented subset: selections, `contains` / `startswith` / `endswith` / `re` / `cidr` / `all`, wildcards, and `and` / `or` / `not` / `1 of` / `all of` conditions. Aggregations, `near`, timeframes and other modifiers are refused.
 - The YARA adapter has only been tested against a stub on this project's development machine, because `yara-python` has no wheel for its Python version.
@@ -381,6 +423,7 @@ src/threatweaver/
   correlate.py           D  correlation rules and cases
   triage.py              E  rule-based triage
   report.py              F  JSON / Markdown reports and traceability verifier
+  attack.py              MITRE ATT&CK hints (patterns, what to check); attack_data.py is the generated ATT&CK reference data
   rules.py               G  Sigma / YARA test harness
   advisory.py            H  advisory workflow
   web/                   local dashboard: api.py (data), server.py (security + HTTP), static/ (page)
@@ -399,6 +442,7 @@ tests/                   pytest suite
 
 ## Data sources and acknowledgements
 
+- [MITRE ATT&CK®](https://attack.mitre.org/): tactic and technique names and identifiers (Enterprise v20), used under MITRE's license. "© 2026 The MITRE Corporation. This work is reproduced and distributed with the permission of The MITRE Corporation."
 - [abuse.ch Feodo Tracker](https://feodotracker.abuse.ch/): botnet C2 IP blocklist (CC0).
 - [abuse.ch URLhaus](https://urlhaus.abuse.ch/): malware URL feed; see abuse.ch's [terms of use](https://abuse.ch/terms-of-use/).
 - [Loghub](https://github.com/logpai/loghub): public system log samples used for real-data checks during development (downloaded locally, not included in this repository).
